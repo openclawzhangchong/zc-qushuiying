@@ -52,8 +52,13 @@ powershell -ExecutionPolicy Bypass -File deploy.ps1
 start.bat
 ```
 
-`start.bat` 需要**从仓库根目录**运行（它按脚本所在目录定位
-`remove-ai-watermarks\webui\app.py`）。
+`deploy.ps1` 会把 `start.bat` 装到上游根目录（`remove-ai-watermarks\start.bat`），
+直接双击即可。脚本会自己识别两种布局：
+
+- 仓库根（`start.bat` 与 `remove-ai-watermarks/` 同级）
+- 上游根（`start.bat` 与 `webui/`、`.venv/` 同级，`deploy.ps1` 默认位置）
+
+> 注意不要用 `remove-ai-watermarks\webui\start.bat`（上游自带，行为不同）。
 
 - 本机访问：http://127.0.0.1:8000/
 - 局域网访问：http://<本机IP>:8000/（启动时控制台会打印实际 IP；防火墙规则名 `Remove AI Watermarks WebUI`）
@@ -121,7 +126,13 @@ MI-GAN / LaMa 推理支持 NVIDIA GPU 加速，**默认优先 CUDA，任何环�
 | 推理中途 GPU 报错 | 禁用 CUDA 后整段用 CPU 重跑一次 |
 | 想强制 CPU | 设置环境变量 `WEBUI_ONNX_DEVICE=cpu` |
 
-启动后访问 `/api/info` 可看到实际使用的设备、原因和空闲显存。`deploy.ps1` 会自动检测 NVIDIA 显卡并安装 GPU 依赖（用 `-NoGpu` 跳过）。
+启动时会对 GPU 做一次**真实推理自检**（跑一张 32×32 的空图），
+只有真正能执行才算可用——仅仅「provider 存在」不算，因为版本不匹配时
+provider 能加载但一执行算子就崩。
+
+启动后访问 `/api/info` 可看到实际使用的设备、原因和空闲显存，
+例如 `{"device":"cuda","reason":"CUDA 可用（空闲显存 7655MB，自检通过）"}`
+或 `{"device":"cpu","reason":"当前显卡架构不被此版本 onnxruntime-gpu 支持（V100/Volta 需 onnxruntime-gpu==1.19.2）"}`。`deploy.ps1` 会自动检测 NVIDIA 显卡并安装 GPU 依赖（用 `-NoGpu` 跳过）。
 
 #### ⚠️ Tesla V100 / Volta（sm_70）注意事项
 
@@ -210,7 +221,7 @@ onnxruntime-gpu 通过 pip 安装的 CUDA/cuDNN DLL 位于 `site-packages/nvidia
 ```
 zc-qushuiying/
 ├── deploy.ps1        # 一键部署：克隆上游、装 WebUI、装依赖、GPU、防火墙
-├── start.bat         # 启动 WebUI（从仓库根目录运行）
+├── start.bat         # 启动 WebUI（自动识别仓库根/上游根两种布局）
 ├── CHANGELOG.md      # 版本变更记录
 ├── docs/
 │   ├── handoff.md                # 交接文档（代码地图 / 发布流程 / 已知坑）

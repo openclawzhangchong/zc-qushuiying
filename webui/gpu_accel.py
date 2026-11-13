@@ -74,6 +74,61 @@ def _gpu_free_memory_mb() -> int | None:
         return None
 
 
+def _cuda_selftest() -> tuple[bool, str]:
+    """真正跑一次最小 GPU 推理，验证 CUDA 不是「名义可用」。
+
+    为什么必须有这一步：``get_available_providers()`` 里出现
+    ``CUDAExecutionProvider`` 只代表这个 wheel 编译时带了 CUDA 支持，
+    **不代表你的显卡能执行**。典型反例：V100(sm_70) 配 onnxruntime-gpu
+    1.20+，provider 加载成功、会话创建成功，但一执行算子就抛
+    ``cudaErrorNoKernelImageForDevice``（官方已移除 sm_70 kernel）。
+
+    实现上用 MI-GAN 的真实 ONNX 模型跑一张极小图（32×32）。不额外引入
+    ``onnx`` 依赖，且这个模型本来就要下载、必然可用。开销约几十毫秒。
+    """
+    try:
+        import numpy as np
+        import onnxruntime as ort
+    except Exception as e:  # noqa: BLE001
+        return False, f"onnxruntime/numpy 不可用: {e}"
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        model_path = hf_hub_download(repo_id="andraniksargsyan/migan", filename="migan.onnx")
+    except Exception as e:  # noqa: BLE001
+        # 模型拿不到时无法自检；此时不应阻止使用 GPU（模型下载是另一回事）
+        return True, f"CUDA provider 存在（未自检，模型不可达: {str(e)[:60]}）"
+
+    try:
+        session = ort.InferenceSession(
+            model_path, providers=["CUDAExecutionProvider"],
+        )
+        actual = session.get_providers()
+        if "CUDAExecutionProvider" not in actual:
+            return False, f"CUDA provider 未生效（actual={actual}）"
+        # MI-GAN 输入：image (1,3,H,W) uint8 / mask (1,1,H,W) uint8（0=hole）
+        size = 32
+        session.run(None, {
+            "image": np.zeros((1, 3, size, size), np.uint8),
+            "mask": np.zeros((1, 1, size, size), np.uint8),
+        })
+        return True, "CUDA 自检通过"
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "NoKernelImageForDevice" in msg or "no kernel image" in msg:
+            return False, (
+                "当前显卡架构不被此版本 onnxruntime-gpu 支持"
+                "（V100/Volta 需 onnxruntime-gpu==1.19.2）"
+            )
+        if "CUDNN_STATUS_EXECUTION_FAILED" in msg:
+            return False, (
+                "cuDNN 不支持当前显卡架构"
+                "（V100/Volta 需 nvidia-cudnn-cu12==9.10.2.21）"
+            )
+        return False, f"CUDA 自检失败: {msg[:160]}"
+
+
 def _cuda_usable() -> tuple[bool, str]:
     """Decide whether CUDA inference should be attempted."""
     forced = os.environ.get("WEBUI_ONNX_DEVICE", "").strip().lower()
@@ -91,7 +146,15 @@ def _cuda_usable() -> tuple[bool, str]:
     free = _gpu_free_memory_mb()
     if free is not None and free < _MIN_FREE_VRAM_MB:
         return False, f"显存不足（空闲 {free}MB < {_MIN_FREE_VRAM_MB}MB）"
-    return True, f"CUDA 可用（空闲显存 {free}MB）" if free is not None else "CUDA 可用"
+
+    # 关键：只有 provider 存在还不够，必须真正跑一次算子。
+    # 否则会在处理几十帧后才因 NoKernelImageForDevice 崩溃，再整段回退重跑，
+    # 既浪费几分钟，也让 /api/info 长时间谎报「GPU 加速」。
+    ok, why = _cuda_selftest()
+    if not ok:
+        return False, why
+    return True, (f"CUDA 可用（空闲显存 {free}MB，自检通过）"
+                  if free is not None else "CUDA 可用（自检通过）")
 
 
 def _make_session_factory(original: Any) -> Any:

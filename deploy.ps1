@@ -61,6 +61,15 @@ New-Item -ItemType Directory -Force -Path $dstWebui | Out-Null
 Copy-Item -Force (Join-Path $srcWebui "*.py") $dstWebui
 Copy-Item -Recurse -Force (Join-Path $srcWebui "static") $dstWebui
 
+# 把我们的启动脚本装到上游根目录，覆盖上游 webui/ 里那个用相对路径的旧脚本。
+# 上游 webui/start.bat 只有一行 `..\.venv\Scripts\python.exe app.py`，
+# 不检查部署状态、不支持 PORT 覆盖、也没提示；用我们的版本替换掉。
+$srcStart = Join-Path $repoRoot "start.bat"
+if (Test-Path $srcStart) {
+    Copy-Item -Force $srcStart (Join-Path $upstream "start.bat")
+    Info "启动脚本已安装到 $upstream\start.bat"
+}
+
 # 4. 安装依赖（uv.lock 锁定版本，含便携版 ffmpeg）
 Info "安装依赖（video + migan，首次较慢）..."
 Push-Location $upstream

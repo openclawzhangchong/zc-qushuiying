@@ -411,13 +411,26 @@ def regions_by_frame(
     *,
     include_pill: bool = True,
     frame_count: int | None = None,
+    extend_tail: bool = True,
 ) -> list[list[tuple[int, int, int, int]]]:
-    """Expand the timeline into a per-frame region list."""
-    total = frame_count or (max(e for _, e, _ in timeline) if timeline else 0)
+    """Expand the timeline into a per-frame region list.
+
+    ``detect_timeline`` 会跳过末尾不足一个分块的帧（默认分块 1 秒），
+    所以它覆盖的帧数可能略少于视频总帧数。传 ``frame_count`` 时按真实帧数
+    生成长度对齐的列表；``extend_tail`` 让尾部继承最后一个已检测区域，
+    避免最后不足 1 秒的画面漏擦。
+    """
+    detected_end = max((e for _, e, _ in timeline), default=0)
+    total = frame_count if frame_count is not None else detected_end
     per_frame: list[list[tuple[int, int, int, int]]] = [[] for _ in range(total)]
     for start, end, box in timeline:
         for i in range(max(0, start), min(total, end)):
             per_frame[i].append(box)
+    # 尾部补齐：检测没覆盖到的帧沿用最后一个区域
+    if extend_tail and timeline and detected_end < total:
+        last_box = timeline[-1][2]
+        for i in range(detected_end, total):
+            per_frame[i].append(last_box)
     if include_pill:
         pill = pill_region(width, height)
         for row in per_frame:

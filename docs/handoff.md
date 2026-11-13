@@ -311,10 +311,99 @@ if ($err.Count) { $err | ForEach-Object { $_.Message } } else { "OK" }
 如确需中文提示，应在文件开头加 `chcp 65001 >nul`，
 但仍建议关键控制流不依赖中文输出。
 
-### 7.9 `start.bat` 必须在仓库根目录运行
+### 7.9 `start.bat` 的两种布局（都是坑源）
 
-它按 `%~dp0` 定位 `remove-ai-watermarks\webui\app.py`。
-上游自己的 `webui/start.bat` 是另一个脚本（用 `..\.venv`），两者不要混淆。
+项目里曾经同时存在三个「启动脚本」，容易混：
+
+| 路径 | 来源 | 说明 |
+| --- | --- | --- |
+| `zc-qushuiying/start.bat` | 本项目 | 修正版，支持两种布局 |
+| `remove-ai-watermarks/webui/start.bat` | **上游自带** | 只有一行 `..\.venv\Scripts\python.exe app.py`，不检查部署状态、不支持 PORT |
+
+**布局 A（仓库根）**：`start.bat` 与 `remove-ai-watermarks/` 同级
+```
+zc-qushuiying/
+├── start.bat
+└── remove-ai-watermarks/{webui,.venv}
+```
+
+**布局 B（上游根）**：`deploy.ps1` 把 `start.bat` 装到这里
+```
+remove-ai-watermarks/
+├── start.bat
+├── webui/app.py
+└── .venv/Scripts/python.exe
+```
+
+脚本用 `if exist` 自动识别，先试 A 再试 B。
+
+**踩过的坑**：早期版本只认布局 A，装到布局 B 后去找
+`remove-ai-watermarks\webui\app.py`，实际变成
+`D:\remove-ai-watermarks\remove-ai-watermarks\webui\app.py`，多一层，
+报「Not deployed」。
+
+**另一个坑**：无条件 `pause` 会让后台/脚本调用挂起。
+现在只在「出错」且「未设 `ZC_NO_PAUSE`」时 pause。
+
+脚本调用推荐：
+```powershell
+$env:ZC_NO_PAUSE = "1"
+cmd /c "D:\remove-ai-watermarks\start.bat"
+```
+
+### 7.10 逐帧区域表可能比视频帧数短
+
+`detect_timeline` 按 1 秒分块，**末尾不足一块的帧会被跳过**。
+所以 ``len(regions) < frame_count`` 是常态，不是异常。
+
+后果：擦除循环若直接 `regions[i]` 取下标，最后几帧必崩
+（实测 98 帧视频崩在第 96 帧，报 `list index out of range`）。
+
+正确做法：
+```python
+# app.py：按真实解码帧数生成
+frame_count = erase_engine.probe_frame_count(job.input_path)
+regions = jimeng_detect.regions_by_frame(tl, w, h, frame_count=frame_count)
+
+# erase_engine：先判边界再取下标，超范围沿用最后一个区域
+if frame_index < len(regions):
+    frame_regions = regions[frame_index]
+else:
+    frame_regions = regions[-1] if regions else []
+```
+
+**注意不要用 `CAP_PROP_FRAME_COUNT`**：它按容器元数据估算。
+实测 `-c copy` 剪出的 4s 片段元数据写 96 帧、实际解码 98 帧，
+差这 2 帧就足以触发崩溃。必须用 `probe_frame_count()` 逐帧读。
+
+### 7.11 `CUDAExecutionProvider` 存在 ≠ GPU 可用
+
+这是本项目最隐蔽的坑。
+
+```python
+"CUDAExecutionProvider" in ort.get_available_providers()   # ← 不够
+```
+
+只说明 wheel 编译时带了 CUDA 支持。能否在你的显卡上执行是另一回事：
+
+| 检查层级 | 能发现什么 |
+| --- | --- |
+| `get_available_providers()` | wheel 是否编译了 CUDA |
+| `session.get_providers()` | provider 是否成功加载（DLL 齐全） |
+| **真正 `session.run()`** | **显卡 kernel 是否兼容** |
+
+V100 配 onnxruntime-gpu 1.20+ 的典型表现：前两层都通过，
+第三层抛 `cudaErrorNoKernelImageForDevice`。
+
+所以 `_cuda_usable()` 必须做一次真实推理自检（见
+`gpu_accel._cuda_selftest()`，用 MI-GAN 模型跑 32×32 空图）。
+否则界面会长时间谎报「GPU 加速」，任务跑几十帧后才崩、再整段重跑。
+
+### 7.12 别用错启动脚本
+
+调试时我曾用 `D:\remove-ai-watermarks\webui\start.bat`（上游自带），
+它不是本项目维护的版本，行为不同（无 PORT 覆盖、无部署检查）。
+**用上游根或仓库根的 `start.bat`**，不要用 `webui/` 里的那个。
 
 ---
 

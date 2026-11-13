@@ -14,6 +14,36 @@
 
 ### 修复
 
+- **短片段崩溃：`list index out of range`**（严重）
+  4 秒左右的短片处理直接失败。根因是逐帧区域表比视频帧数**短**：
+  `detect_timeline` 会跳过末尾不足一个分块（默认 1 秒）的帧，
+  所以 98 帧的视频只生成 96 项区域。而擦除循环先 `regions[i]` 取下标、
+  再判断越界，第 96 帧必然抛 `IndexError`。
+  修复两处：
+  - `erase_video_regions` 先判边界再取下标，超范围时沿用最后一个已知区域
+  - `regions_by_frame` 新增 `frame_count` / `extend_tail`，按真实解码帧数
+    生成长度对齐的列表，尾部继承最后区域（避免最后不足 1 秒漏擦）
+
+  新增 `erase_engine.probe_frame_count()`：逐帧读一遍拿真实帧数
+  （`CAP_PROP_FRAME_COUNT` 按元数据估算，实测 4s 片段元数据 96 帧、
+  实际解码 98 帧，差 2 帧就足以崩）。
+
+- **`/api/info` 谎报 GPU 可用**（严重）
+  `CUDAExecutionProvider` 出现在 provider 列表里，只说明这个 wheel 编译时
+  带了 CUDA 支持，**不代表当前显卡能执行**。V100 配 onnxruntime-gpu 1.20+
+  时，provider 加载成功、会话创建成功，但一执行算子就抛
+  `cudaErrorNoKernelImageForDevice`。旧实现在这种状态下仍然报告
+  `device: cuda`，导致任务先用 GPU 跑几十帧才崩、再整段回退重跑，
+  白白浪费几分钟。
+
+  新增 `_cuda_selftest()`：用 MI-GAN 的真实 ONNX 模型跑一张 32×32 的
+  空推理（不引入 `onnx` 依赖，模型本来就要下载）。失败则直接判定
+  GPU 不可用，并给出可操作的原因（如「V100/Volta 需
+  onnxruntime-gpu==1.19.2」）。
+
+  实测：ORT 1.22.0 时正确返回 `device: cpu` + 明确原因；
+  切回 1.19.2 后返回 `device: cuda` + 「自检通过」。
+
 - **即梦「梦」字残留**（重要，v1.1.0 内二次修复）
   左下角擦完后仍能看到「梦」字。原因：中文笔画在白色掩码里会断成多个
   连通域——实测「即梦」被切成三块，「即」拆成两块（x=117、138），
@@ -56,6 +86,21 @@
 - **`deploy.ps1` 在 PowerShell 5.1 上报假语法错误**
   文件是 UTF-8 无 BOM，PS 5.1 按 GBK 解码中文注释后字节错位，
   报出「意外的标记 '}'」这类误导性错误。已加 UTF-8 BOM。
+
+- **部署后没有可用的 `start.bat`**
+  `deploy.ps1` 只打印「运行 start.bat」，但既没把它复制到部署目录，
+  也没说明该在哪执行。全新部署后用户会找不到启动入口。
+  现在 `deploy.ps1` 会把 `start.bat` 装到上游根目录。
+
+- **`start.bat` 装到上游根后路径失效**
+  早期只支持「仓库根布局」（`start.bat` 与 `remove-ai-watermarks/` 同级的
+  子目录结构）。装到上游根后，它去找 `remove-ai-watermarks\webui\app.py`，
+  变成 `D:\remove-ai-watermarks\remove-ai-watermarks\webui\app.py`，
+  多了一层目录，报「Not deployed」。现在自动识别两种布局。
+
+- **`start.bat` 的 `pause` 会阻塞脚本调用**
+  两处无条件 `pause` 导致被后台/脚本调用时挂起。
+  改为仅在出错且非脚本模式（`ZC_NO_PAUSE` 未设置）时 pause。
 
 - **`start.bat` 行尾与编码**
   原文为 LF 行尾且含中文，在 cmd.exe（代码页 936）下会行粘连、

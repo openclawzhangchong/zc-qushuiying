@@ -204,7 +204,13 @@ def run_job(job: Job) -> None:
                         job.log.append(
                             f"  [detect] 帧 {s}-{e - 1} 区域 {b} ({b[2]}x{b[3]})"
                         )
-                    regions = jimeng_detect.regions_by_frame(timeline, w, h)
+                    # 逐帧区域表必须覆盖全部可解码帧：检测时段只到最后一块
+                    # 有命中的地方，结尾未覆盖的帧（黑场/解码帧数差）也要有
+                    # 行可索引，否则擦除循环会越界。
+                    frame_count = erase_engine.probe_frame_count(job.input_path)
+                    regions = jimeng_detect.regions_by_frame(
+                        timeline, w, h, frame_count=frame_count
+                    )
                 else:
                     # 检测失败时退化为固定四角全覆盖，宁可多擦也不漏水印
                     job.log.append("  [detect] 未定位到 logo，回退为固定四角全覆盖")

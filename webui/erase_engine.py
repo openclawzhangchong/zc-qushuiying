@@ -94,6 +94,28 @@ def probe_geometry(source: Path) -> tuple[int, int, float]:
     return width, height, fps
 
 
+def probe_frame_count(source: Path) -> int:
+    """Number of decodable frames, counted the same way erase does.
+
+    ``CAP_PROP_FRAME_COUNT`` 按容器元数据估算，与真实解码结果可能差几帧
+    （实测 -c copy 剪出的 4s 片段元数据 96 帧、实际解码 98 帧）。
+    逐帧读一遍才能拿到与擦除循环一致的数量。
+    """
+    capture = open_video_capture(source)
+    if not capture.isOpened():
+        raise RuntimeError(f"OpenCV could not decode video: {source}")
+    count = 0
+    try:
+        while True:
+            ok, _frame = capture.read()
+            if not ok:
+                break
+            count += 1
+    finally:
+        capture.release()
+    return count
+
+
 def resolve_regions(
     source: Path,
     regions: list[Region],
@@ -218,9 +240,13 @@ def erase_video_regions(
                 if not ok:
                     raise RuntimeError(f"Video ended while reading frame {frame_index}: {source}")
                 source_frame = frame
-                frame_regions = regions[frame_index] if per_frame else regions
-                if per_frame and frame_index >= len(regions):
-                    frame_regions = []
+                if per_frame:
+                    # 解码帧数可能多于检测时段覆盖的帧数（如结尾黑场、两次解码
+                    # 帧数不一致）。越界的帧没有已定位的水印，直接原样写出。
+                    frame_regions = regions[frame_index] \
+                        if frame_index < len(regions) else []
+                else:
+                    frame_regions = regions
                 combined_mask: np.ndarray | None = None
                 for region in frame_regions:  # type: ignore[union-attr]
                     mask = _mask_for_region(
