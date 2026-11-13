@@ -74,8 +74,13 @@ def _font_path() -> str | None:
 
 
 def _draw_watermark(canvas: np.ndarray, x: int, y: int, nickname: str,
-                    word_h: int = 28, nick_h: int = 16) -> tuple[int, int, int, int]:
-    """在 BGR 画布上画 [箭头]即梦 / @昵称，返回字形像素的联合包围盒（不含箭头）。"""
+                    word_h: int = 28, nick_h: int = 16,
+                    nick_dx: int = 0) -> tuple[int, int, int, int]:
+    """在 BGR 画布上画 [箭头]即梦 / @昵称，返回字形像素的联合包围盒（不含箭头）。
+
+    ``nick_dx``：昵称行相对 wordmark 的水平偏移（真实竖屏样本里昵称
+    比 wordmark 左伸约 2.6×字高，用负值模拟）。
+    """
     from PIL import Image, ImageDraw, ImageFont
 
     fh, fw = canvas.shape[:2]
@@ -88,7 +93,7 @@ def _draw_watermark(canvas: np.ndarray, x: int, y: int, nickname: str,
     nb = d.textbbox((0, 0), nickname, font=f_nick)
     wx, wy = x + 30 - wb[0], y - wb[1]
     d.text((wx, wy), "即梦", font=f_word, fill=(250, 250, 250))
-    nx, ny = x + 30 - nb[0], y + word_h + 10 - nb[1]
+    nx, ny = x + 30 + nick_dx - nb[0], y + word_h + 10 - nb[1]
     d.text((nx, ny), nickname, font=f_nick, fill=(250, 250, 250))
     out = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
     # 彩色渐变箭头（不在白色掩码里，模拟真实设计）
@@ -115,9 +120,10 @@ def _gradient_canvas(size: tuple[int, int], seed: int = 11) -> np.ndarray:
 
 
 def _corner_canvas(corner: str, size: tuple[int, int] = (1280, 720),
-                   nickname: str = "@娥酱", k: float = 1.0
+                   nickname: str = "@娥酱", k: float = 1.0,
+                   nick_dx: int = 0
                    ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
-    """水印贴在指定角（尺寸与边距按 k 缩放），返回 (画布, 水印字形 bbox)。"""
+    """水印贴在指定角/位（尺寸与边距按 k 缩放），返回 (画布, 水印字形 bbox)。"""
     w, h = size
     canvas = _gradient_canvas(size)
     word_h = max(8, round(28 * k))
@@ -128,9 +134,12 @@ def _corner_canvas(corner: str, size: tuple[int, int] = (1280, 720),
         ox, oy = round(55 * k), round(h - 90 * k - 70 * k)
     elif corner == "TR":
         ox, oy = round(w - 62 * k - 200 * k), round(61 * k)
+    elif corner == "ML":  # 竖屏第二轮换位：左中（实测 y≈0.47~0.54H）
+        ox, oy = round(40 * k), round(590 * k)
     else:  # TL：避开药丸常驻位，专测 TL 窗口
         ox, oy = 200, 120
-    glyph_bbox = _draw_watermark(canvas, ox, oy, nickname, word_h, nick_h)
+    glyph_bbox = _draw_watermark(canvas, ox, oy, nickname, word_h, nick_h,
+                                 nick_dx=nick_dx)
     return canvas, glyph_bbox
 
 
@@ -290,30 +299,77 @@ def test_jimeng_regions_16_9_unchanged():
 
 
 def test_jimeng_regions_vertical_covers_logo():
-    """非 16:9 兜底区域：角部锚定框必须盖住两种缩放假设下的 logo 位置。"""
+    """非 16:9 兜底区域：必须盖住真实竖屏样本（shuping.mp4）实测的三个
+    logo 位（右下 / 左中 / 右上，含昵称行左伸与星标箭头），并随帧尺寸
+    等比缩放。"""
     if not HAVE_ERASE_ENGINE:
         print("-> 跳过（上游未部署）")
         return
-    w, h = 720, 1280
-    pill, br, bl, tr = erase_engine.jimeng_regions(w, h)
-    # 假设 A（绝对尺寸）：用 1280x720 实测设计框（1064,551,143,80 / 55,614,148,95 /
-    # 1081,61,137,82）按角锚定到竖屏
-    a_br = (w - 76 - 143, h - 169, 143, 80)
-    # 假设 B（按宽缩放，k=0.5625）：块 80x45，距右边 43 / 距底 51
-    k = w / 1280.0
-    b_br = (round(w - 76 * k - 143 * k), round(h - 90 * k - 80 * k),
-            round(143 * k), round(80 * k))
-    assert _contains(br, a_br, tol=0), f"BR 兜底 {br} 应盖住 {a_br}"
-    assert _contains(br, b_br, tol=2), f"BR 兜底 {br} 应盖住 {b_br}"
-    a_bl = (55, h - 106, 148, 95)
-    b_bl = (round(55 * k), round(h - 90 * k - 80 * k), round(148 * k), round(95 * k))
-    assert _contains(bl, a_bl, tol=0), f"BL 兜底 {bl} 应盖住 {a_bl}"
-    assert _contains(bl, b_bl, tol=2), f"BL 兜底 {bl} 应盖住 {b_bl}"
-    a_tr = (w - 62 - 137, 61, 137, 82)
-    b_tr = (round(w - 62 * k - 137 * k), round(61 * k), round(137 * k), round(82 * k))
-    assert _contains(tr, a_tr, tol=0), f"TR 兜底 {tr} 应盖住 {a_tr}"
-    assert _contains(tr, b_tr, tol=2), f"TR 兜底 {tr} 应盖住 {b_tr}"
+    # 720×1280 实测字形范围（含彩色箭头/星标与昵称行，已含余量）
+    measured = {
+        "br": (424, 1098, 224, 99),
+        "ml": (31, 601, 226, 94),
+        "tr": (435, 48, 225, 101),
+    }
+    for (w, h) in ((720, 1280), (1080, 1920)):
+        sx, sy = w / 720.0, h / 1280.0
+        pill, br, ml, tr = erase_engine.jimeng_regions(w, h)
+        for got, (name, (mx, my, mw, mh)) in zip((br, ml, tr), sorted(measured.items())):
+            want = (round(mx * sx), round(my * sy), round(mw * sx), round(mh * sy))
+            assert _contains(got, want, tol=2), \
+                f"{name} 兜底 {got} 应盖住实测框 {want} @{w}x{h}"
+    # 720×1280 时直接用实测原框断言（无缩放误差）
+    pill, br, ml, tr = erase_engine.jimeng_regions(720, 1280)
+    assert _contains(br, (424, 1098, 224, 99), tol=0)
+    assert _contains(ml, (31, 601, 226, 94), tol=0)
+    assert _contains(tr, (435, 48, 225, 101), tol=0)
+    # 竖屏实测药丸 (18,14,73,32)
+    assert _contains(pill, (18, 14, 73, 32), tol=0)
     assert _contains(pill, (6, 8, 80, 40), tol=0)
+
+
+def test_portrait_middle_left_detected():
+    """竖屏第二轮换位在**左中**（真实样本实测 y≈0.48~0.54H）：
+    720×1280 画布上 ML 窗口必须能检出该位置的水印。"""
+    canvas, gbox = _corner_canvas("ML", size=(720, 1280))
+    hit = _detect_frame(canvas, "ML")
+    assert hit is not None, "竖屏左中位置未检出"
+    assert _contains(hit, gbox), f"bbox={hit} 应包含 {gbox}"
+
+
+def test_nickname_extends_left_covered():
+    """昵称比 wordmark 左伸 2.6×字高（真实竖屏样本）：
+    擦除框左界必须外扩到昵称左缘，否则行首字符残留。
+
+    断言对象是「可检字形」（面积 >=25，与弱档门槛一致）：simhei 在
+    16px 下渲染的收尾括号 」白色核心只有 ~2px²，低于任何掩码门槛，
+    属于不可见残留，不纳入断言；真实即梦字体的 」约 35px²，由真实
+    样本（shuping.mp4）的端到端残留指标覆盖。
+    """
+    wh = 28
+    canvas, gbox = _corner_canvas("BR", nickname="@易梦麟「分身可用」",
+                                  nick_dx=-round(wh * 2.6))
+    hit = _detect_frame(canvas, "BR")
+    assert hit is not None
+    assert hit[0] <= gbox[0] + 3,         f"框左界 {hit[0]} 未盖住昵称左缘 {gbox[0]}"
+    # 可检字形联合 bbox：把画布水印区按弱档门槛重提一遍
+    import cv2  # noqa: PLC0415
+    gx1, gy1, gw, gh = gbox
+    roi = canvas[gy1:gy1 + gh, gx1:gx1 + gw]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    m = ((hsv[:, :, 2] > 178) & (hsv[:, :, 1] < 90)).astype(np.uint8)
+    ys, xs = np.nonzero(m)
+    # 按连通域过滤：保留面积 >=25 的字形像素
+    mf = cv2.morphologyEx(m * 255, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    nfrm, lab = cv2.connectedComponents(mf)
+    keep = np.zeros_like(m, bool)
+    for li in range(1, nfrm):
+        if (lab == li).sum() >= 25:
+            keep |= (lab == li)
+    ys, xs = np.nonzero(keep)
+    detectable = (gx1 + int(xs.min()), gy1 + int(ys.min()),
+                  int(xs.max() - xs.min()) + 1, int(ys.max() - ys.min()) + 1)
+    assert _contains(hit, detectable), f"bbox={hit} 应包含可检字形 {detectable}"
 
 
 def test_vertical_scaled_watermark_detected():

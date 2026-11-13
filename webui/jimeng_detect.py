@@ -50,6 +50,23 @@ CORNERS: dict[str, tuple[float, float]] = {
     "BR": (1.0 - WINDOW_W_FRAC, 1.0 - WINDOW_H_FRAC),
 }
 
+# 竖屏的第二个轮换位在**左中**而非左下：真实竖屏样本（720×1280）实测
+# 水印位于 y 0.478~0.540H（垂直居中偏上），BL 窗口（0.66H~H）完全罩不住。
+# 因此竖屏用 {TL, TR, ML, BR}，横屏沿用 1280×720 标定的四角。
+ML_Y_FRAC = 0.42
+
+
+def corner_windows(width: int, height: int) -> dict[str, tuple[float, float]]:
+    """Aspect-aware corner windows (relative origins)."""
+    if height > width:
+        return {
+            "TL": (0.0, 0.0),
+            "TR": (1.0 - WINDOW_W_FRAC, 0.0),
+            "ML": (0.0, ML_Y_FRAC),
+            "BR": (1.0 - WINDOW_W_FRAC, 1.0 - WINDOW_H_FRAC),
+        }
+    return dict(CORNERS)
+
 # "AI生成" 药丸在左上角的固定位置（相对坐标，1280x720 实测标定）。
 # 它是整片常驻的合规标识，不需要随时间变化。
 PILL_REL: tuple[float, float, float, float] = (0.0047, 0.0111, 0.0625, 0.0556)
@@ -109,7 +126,9 @@ def _glyphs(img: np.ndarray, frame_width: int | None = None) -> list[dict]:
     fw = frame_width or max(1, int(round(img.shape[1] / WINDOW_W_FRAC)))
     strong_area = _adaptive(110, fw, lo=30)
     strong_fill = 0.13
-    base_area = _adaptive(40, fw, lo=12)
+    # 弱档下探到 25：昵称行尾的「」括号笔画极瘦（实测白色核心仅 ~35px²），
+    # 40 的门槛会把收尾括号整字丢弃、擦除框右缘差出一个字宽。
+    base_area = _adaptive(25, fw, lo=8)
     base_fill = 0.08
     bh_min = _adaptive(11, fw, lo=5)
     bw_min = _adaptive(5, fw, lo=2)
@@ -216,35 +235,52 @@ def _find_nickname(glyphs: list[dict], wordmark: list[dict],
             continue
         if g["h"] < nick_h_min or g["h"] > wh * 1.15:
             continue
-        # 水平上要与 wordmark 有重叠或紧邻（昵称常与 logo 左对齐或向右溢出）
-        if g["x"] + g["w"] < wx1 - wh * 1.5 or g["x"] > wx2 + wh * 9.0:
+        # 水平上要与 wordmark 有重叠或紧邻。左门坎放宽到 4×字高：真实竖屏
+        # 样本里昵称比 wordmark 左伸 2.6×字高（右下角时昵称行更宽、左对齐
+        # 位置更靠左），1.5×字高会把行首的 @ 和第一个字拒掉、造成残留。
+        if g["x"] + g["w"] < wx1 - wh * 4.0 or g["x"] > wx2 + wh * 9.0:
             continue
         picked.append(g)
     if not picked:
         return []
-    # 只保留水平上连成一片的字形，避免把远处无关亮点算进来。
-    # 昵称里的简单字（十/三/之/语）白色核心小、可能整字不达强档字形门槛，
-    # 在链上留下 1~3 个字宽的空洞；擦除框是并集矩形——只要链延伸过去，
-    # 缺失字符的像素自然被盖住。因此允许**跨洞续链**，但必须满足：
-    #   1. 洞后的字形与链**同一文字行**（y 中心偏差 ≤ 0.35×字高）——
-    #      实测真实视频里 @娥酱 右侧 121px 处的背景碎石反光（不同行）
-    #      会被这条挡掉，不会误扩擦除框；
-    #   2. 空洞宽度 ≤ 4.5×字高（实测 12 字昵称最大缺口约 3.4×字高，
-    #      真实字间距 ≤0.5×字高）。
+    # 链式收集：从**最靠近 wordmark 左缘**的字形出发（昵称与 logo 在那里
+    # 相接），向右、向两个方向延伸。
+    #   向右：正常字距 ≤2.2×字高；跨洞续链 ≤4.5×字高且必须同行——昵称里的
+    #     简单字/细瘦括号（十/三/之/」）白色核心小、可能整字不达字形门槛，
+    #     在链上留下 1~3 个字宽的空洞；擦除框是并集矩形，只要链延伸过去，
+    #     缺失字符自然被盖住。真实视频里 @娥酱 右侧 121px 的碎石反光
+    #     （不同行）会被同行判据挡掉。
+    #   向左：只允许正常字距（≤2.2×字高），不允许跨洞——真实竖屏样本里
+    #     昵称左伸部分与 wordmark 之间字距连续；而横屏样本 @娥酱 左侧
+    #     92px 的背景亮点隔着大空隙，若允许跨洞会被误链、框左界多擦
+    #     40px（实测回归）。
     picked.sort(key=lambda g: g["x"])
-    chain = [picked[0]]
-    for g in picked[1:]:
+    start_i = min(range(len(picked)),
+                  key=lambda i: abs(picked[i]["x"] - wx1))
+    chain = [picked[start_i]]
+    for g in picked[start_i + 1:]:
         ref = chain[-1]
         gap = g["x"] - (ref["x"] + ref["w"])
         if gap > max(ref["h"], g["h"]) * 4.5:
             break
         if gap > max(ref["h"], g["h"]) * 2.2:
-            # 空洞续链：必须同行，否则视为无关亮点
             ref_c = ref["y"] + ref["h"] / 2
             g_c = g["y"] + g["h"] / 2
             if abs(g_c - ref_c) > max(ref["h"], g["h"]) * 0.35:
                 break
         chain.append(g)
+    left_part: list[dict] = []
+    for g in reversed(picked[:start_i]):
+        ref = left_part[0] if left_part else chain[0]
+        gap = ref["x"] - (g["x"] + g["w"])
+        if gap > max(ref["h"], g["h"]) * 2.2:
+            break
+        ref_c = ref["y"] + ref["h"] / 2
+        g_c = g["y"] + g["h"] / 2
+        if abs(g_c - ref_c) > max(ref["h"], g["h"]) * 0.35:
+            break
+        left_part.append(g)
+    chain = list(reversed(left_part)) + chain
     return chain
 
 
@@ -298,15 +334,21 @@ def detect_in_window(
     # 左侧补上彩色渐变箭头。"即梦" logo 是同一份设计资产，箭头位置相对
     # 首字左边缘是固定的，只有缩放差异；三点实测比值 0.96 / 1.83 / 1.59，
     # 取 1.9 作为安全上限（宁可多擦几像素，也不能漏掉箭头）。
+    # 但昵称行可能比 wordmark 更靠左（真实竖屏样本左伸 2.6×字高），
+    # 此时框左界必须外扩到昵称左缘，否则行首字符残留。
+    pad = max(4, int(round(wh * 0.25)))
     x1 = max(0, wm[0] - int(round(wh * 1.9)))
-    y1 = max(0, wm[1] - int(round(wh * 0.10)))
+    if nickname and full[0] < x1:
+        x1 = max(0, full[0] - pad)
+    # 顶部余量 0.35×字高：星标箭头比文字行更高（真实竖屏样本实测顶尖
+    # 超出 wordmark 顶约 0.3×字高），0.10 会留下彩色箭头尖残留。
+    y1 = max(0, wm[1] - int(round(wh * 0.35)))
     x2 = full[0] + full[2]
     y2 = full[1] + full[3] + int(round(wh * 0.10))
 
     # 右/下各留一点安全余量：字形最右一列的抗锯齿像素可能低于白色阈值，
     # 导致检测框紧贴笔画边缘（实测左下角右侧只剩 2px，擦完仍有残影）。
     # 半个字高以内都是纯背景，多擦这一点不会有观感损失。
-    pad = max(3, int(round(wh * 0.18)))
     x2 += pad
     y2 += pad
 
@@ -341,7 +383,7 @@ def _read_frames(source: Path) -> tuple[list[np.ndarray], float]:
 
 
 def _window(width: int, height: int, corner: str) -> tuple[int, int, int, int]:
-    fx, fy = CORNERS[corner]
+    fx, fy = corner_windows(width, height)[corner]
     wx, wy = int(round(width * fx)), int(round(height * fy))
     ww = min(int(round(width * WINDOW_W_FRAC)), width - wx)
     wh = min(int(round(height * WINDOW_H_FRAC)), height - wy)
@@ -374,7 +416,7 @@ def detect_timeline(
             break
         idx = np.linspace(start, end - 1, min(samples_per_chunk, end - start)).astype(int)
         best: LogoHit | None = None
-        for corner in CORNERS:
+        for corner in corner_windows(w, h):
             wx, wy, ww, wh = _window(w, h, corner)
             if ww <= 8 or wh <= 8:
                 continue
@@ -457,9 +499,22 @@ def detect_timeline(
             if pick:
                 out.append((seg["start"], seg["end"], merge_max(pick["boxes"])))
             continue
-        # 长空档：把所有检测到的角都擦一遍，确保转场/淡出时不留残影
-        for corner in corner_boxes:
-            out.append((seg["start"], seg["end"], corner_boxes[corner]))
+        # 长空档分两种：
+        #   片中空档（之后还有检出）：水印大概率仍在轮换，只是没检出，
+        #     全程擦所有已知角（宁可多擦）。
+        #   片尾空档（直到视频结束都没有检出）：水印已随淡出消失，只擦
+        #     最后检出段之后 ~1s 的过渡窗。不再全程兜底——黑场上的品牌
+        #     片尾动画（如「即梦AI」居中出场）是视频内容，兜底框会盖住
+        #     它的边缘，全程擦除会毁掉它（真实竖屏样本实测）。
+        is_tail_gap = not any(s["corner"] for s in segments[si + 1:])
+        if is_tail_gap:
+            gap_end = min(seg["end"], seg["start"] + int(round(fps * 1.0)))
+        else:
+            gap_end = seg["end"]
+        for gs in range(seg["start"], gap_end, chunk):
+            ge = min(gs + chunk, gap_end)
+            for corner in corner_boxes:
+                out.append((gs, ge, corner_boxes[corner]))
 
     out.sort(key=lambda x: x[0])
     return out
@@ -475,10 +530,13 @@ def pill_region(width: int, height: int) -> tuple[int, int, int, int]:
 
     1. 原始标定（x/w 随帧宽、y/h 随帧高）——16:9 下与按宽缩放完全一致；
     2. 整体按帧宽等比缩放（叠加层随播放器宽度缩放的假设）；
-    3. 位置随帧宽、尺寸保持 720p 设计值（叠加层不随分辨率缩放的假设）。
+    3. 位置随帧宽、尺寸保持 720p 设计值（叠加层不随分辨率缩放的假设）；
+    4. 非 16:9 额外并入**真实竖屏样本实测框**：720×1280 实测药丸位于
+       (18, 14, 73, 32)，边距与横屏标定明显不同（x 边距 18 vs 6，
+       高度 32 vs 40），前三种假设在竖屏上都盖不住它的右端。
 
-    16:9 分辨率上三者重合或互为子集，行为与旧版一致；非 16:9 上并集
-    才生效。并集带来的多擦区域都在左上角内，无观感损失。
+    16:9 分辨率上 1~3 重合或互为子集，行为与旧版一致；竖屏上四个框
+    取并集。多擦区域都在左上角内，无观感损失。
     """
     rx, ry, rw, rh = PILL_REL
     k = width / 1280.0
@@ -487,6 +545,9 @@ def pill_region(width: int, height: int) -> tuple[int, int, int, int]:
         (round(6 * k), round(8 * k), round(80 * k), round(40 * k)),
         (6, 8, 80, 40),
     ]
+    if abs(height * 16 - width * 9) > max(2, round(width * 0.002)):
+        boxes.append((round(width * 0.025), round(height * 0.011),
+                      round(width * 0.102), round(height * 0.025)))
     x1 = min(b[0] for b in boxes)
     y1 = min(b[1] for b in boxes)
     x2 = max(b[0] + b[2] for b in boxes)
