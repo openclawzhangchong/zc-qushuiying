@@ -186,29 +186,61 @@ function fmtDate(ts) { return new Date(ts*1000).toLocaleString('zh-CN', {hour12:
 
 async function refresh() {
   let jobs = [];
-  try { jobs = await (await fetch('/api/jobs')).json(); } catch (e) {}
+  try { jobs = await (await fetch('/api/jobs')).json(); } catch (e) { return; }
   const box = $('#jobs');
   if (!jobs.length) { box.innerHTML = '<div class="meta">暂无任务</div>'; return; }
-  box.innerHTML = jobs.map(j => {
-    const badge = { queued:'排队中', running:'处理中', done:'完成', failed:'失败', cancelled:'已取消' }[j.status];
-    let inner = `<div class="job-head">
+
+  // 增量渲染：以 job id 为键复用已有节点。
+  // 早期版本每 2 秒整块重建 DOM，会让 <video> 被销毁重建，表现为画面狂闪、
+  // 播放进度归零。这里只改发生变化的文本，视频节点在状态稳定后永不重建。
+  const seen = new Set();
+  for (const j of jobs) {
+    seen.add(j.id);
+    let el = box.querySelector(`[data-job="${j.id}"]`);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'job';
+      el.dataset.job = j.id;
+      el._sig = '';
+      box.appendChild(el);
+    }
+    // 签名包含所有会影响视频节点的字段；只有它变化时才重建整块
+    const sig = [j.status, j.media_url, j.message, j.output_name, j.backend,
+                 j.mode, j.preset, j.trim_end, j.temporal].join('|');
+    if (el._sig !== sig) {
+      el._sig = sig;
+      el.innerHTML = renderJob(j);
+    } else {
+      // 仅更新耗时这类高频小字段，避免触碰 <video>
+      const t = el.querySelector('[data-elapsed]');
+      if (t) t.textContent = fmtTime(j.elapsed);
+    }
+  }
+  // 移除已删除的任务节点
+  for (const el of [...box.children]) {
+    if (el.dataset && el.dataset.job && !seen.has(el.dataset.job)) el.remove();
+  }
+}
+
+function renderJob(j) {
+  const badge = { queued:'排队中', running:'处理中', done:'完成', failed:'失败', cancelled:'已取消' }[j.status];
+  let inner = `<div class="job-head">
       <div class="job-name">${escapeHtml(j.name)}</div>
       <div><span class="badge ${j.status}">${badge}</span>
         <button class="btn-s" onclick="del('${j.id}')">删除</button>
         ${j.status==='running'||j.status==='queued' ? `<button class="btn-s" onclick="cancelJob('${j.id}')">取消</button>` : ''}</div>
     </div>
-    <div class="meta">${fmtDate(j.created)} · 模式: ${{auto:'自动识别',all:'去水印+元数据',erase:'区域擦除',metadata:'仅元数据'}[j.mode] || j.mode}${j.preset?' · 预设 '+j.preset:''} · 后端: ${j.backend}${j.trim_end>0 ? ' · 剪尾 '+j.trim_end+' 秒' : ''} · 已用 ${fmtTime(j.elapsed)}</div>`;
-    if (j.status === 'running') inner += `<div class="progress"><i></i></div>`;
-    if (j.message) inner += `<div class="meta">${escapeHtml(j.message)}</div>`;
-    if (j.status === 'done' && j.media_url) {
-      inner += `<video controls preload="metadata" src="${j.media_url}"></video>
-        <div style="margin-top:8px;"><a class="dl" href="${j.download_url}">⬇ 下载去水印视频 (${j.output_name || ''})</a></div>`;
-    }
-    if (j.log && j.log.length) {
-      inner += `<details class="log"><summary>处理日志</summary><pre class="logbody">${escapeHtml(j.log.join('\n'))}</pre></details>`;
-    }
-    return `<div class="job">${inner}</div>`;
-  }).join('');
+    <div class="meta">${fmtDate(j.created)} · 模式: ${{auto:'自动识别',all:'去水印+元数据',erase:'区域擦除',metadata:'仅元数据'}[j.mode] || j.mode}${j.preset?' · 预设 '+j.preset:''} · 后端: ${j.backend}${j.trim_end>0 ? ' · 剪尾 '+j.trim_end+' 秒' : ''} · 已用 <span data-elapsed>${fmtTime(j.elapsed)}</span></div>`;
+  if (j.status === 'running') inner += `<div class="progress"><i></i></div>`;
+  if (j.message) inner += `<div class="meta">${escapeHtml(j.message)}</div>`;
+  if (j.status === 'done' && j.media_url) {
+    inner += `<video controls preload="metadata" playsinline src="${j.media_url}"></video>
+      <div style="margin-top:8px;"><a class="dl" href="${j.download_url}">⬇ 下载去水印视频 (${j.output_name || ''})</a></div>`;
+  }
+  if (j.log && j.log.length) {
+    inner += `<details class="log"><summary>处理日志</summary><pre class="logbody">${escapeHtml(j.log.join('\n'))}</pre></details>`;
+  }
+  return inner;
 }
 
 async function cancelJob(id) { await fetch(`/api/job/${id}/cancel`, {method:'POST'}); refresh(); }

@@ -18,11 +18,12 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from email.utils import formatdate
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -487,27 +488,43 @@ MEDIA_TYPES = {
 def _range_response(
     request: Request, path: Path, media_type: str, filename: str | None = None,
 ) -> StreamingResponse:
-    """Stream a file honoring HTTP Range so LAN browsers can seek/preview large videos."""
+    """Stream a file honoring HTTP Range so LAN browsers can seek/preview large videos.
+
+    Content-Length is mandatory here: Chrome/Safari use it (together with the
+    media duration) to lay out the seek bar and to decide how much to buffer
+    ahead. Omitting it makes some browsers stop after the first few seconds.
+    """
     size = path.stat().st_size
     start, end = 0, size - 1
     status_code = 200
     rng = request.headers.get("range")
     if rng:
         m = re.match(r"bytes=(\d*)-(\d*)", rng.strip())
-        if m:
-            if m.group(1):
-                start = int(m.group(1))
-            if m.group(2):
-                end = min(int(m.group(2)), size - 1)
+        if m and (m.group(1) or m.group(2)):
             if not m.group(1) and m.group(2):
+                # suffix range: last N bytes
                 start = max(0, size - int(m.group(2)))
+            else:
+                start = int(m.group(1))
+                if m.group(2):
+                    end = min(int(m.group(2)), size - 1)
+            if start >= size or start > end:
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+                )
             status_code = 206
     length = end - start + 1
     headers = {
+        "Content-Length": str(length),
         "Content-Range": f"bytes {start}-{end}/{size}",
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-store",
+        "Last-Modified": formatdate(path.stat().st_mtime, usegmt=True),
     }
+    if status_code == 200:
+        # 非分段请求不需要 Content-Range，带上部分客户端会误解为分段响应
+        headers.pop("Content-Range", None)
     if filename:
         headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(filename)}"
     fh = path.open("rb")
