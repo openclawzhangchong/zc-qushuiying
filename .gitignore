@@ -1,0 +1,8 @@
+# 部署产物（上游克隆与依赖）不入库
+/remove-ai-watermarks/
+
+# WebUI 运行数据
+webui/data/
+__pycache__/
+*.pyc
+.venv/
