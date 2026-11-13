@@ -8,7 +8,8 @@
 
 param(
     [int]$Port = 8000,
-    [switch]$NoFirewall
+    [switch]$NoFirewall,
+    [switch]$NoGpu
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,7 +66,27 @@ finally {
     Pop-Location
 }
 
-# 5. 防火墙放行（需要管理员权限，失败不影响部署）
+# 6. 可选：安装 GPU 加速（NVIDIA 显卡，MI-GAN/LaMa 推理提速）
+if (-not $NoGpu) {
+    $gpu = (nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1)
+    if ($gpu) {
+        Info "检测到 NVIDIA GPU: $gpu，安装 onnxruntime-gpu + CUDA 运行时..."
+        $py = Join-Path $upstream ".venv\Scripts\python.exe"
+        # onnxruntime-gpu 1.19.2 + cuDNN 9.10.2.21 是仍支持 Volta(sm_70) 的组合；
+        # 更新的 ORT 在 V100 上报 cudaErrorNoKernelImageForDevice，
+        # 更新的 cuDNN(9.12+) 在 V100 上报 CUDNN_STATUS_EXECUTION_FAILED_CUDART。
+        & uv pip install --python $py `
+            "onnxruntime-gpu==1.19.2" "nvidia-cudnn-cu12==9.10.2.21" `
+            "nvidia-cublas-cu12" "nvidia-cuda-runtime-cu12" "nvidia-cufft-cu12"
+        if ($LASTEXITCODE -eq 0) { Info "GPU 推理依赖已安装（启动时自动优先 CUDA，失败回退 CPU）" }
+        else { Info "GPU 依赖安装失败，将使用 CPU（功能不受影响）" }
+    }
+    else {
+        Info "未检测到 NVIDIA GPU，跳过 GPU 加速安装（使用 CPU）"
+    }
+}
+
+# 7. 防火墙放行（需要管理员权限，失败不影响部署）
 if (-not $NoFirewall) {
     netsh advfirewall firewall add rule name="Remove AI Watermarks WebUI" dir=in action=allow protocol=TCP localport=$Port | Out-Null
     if ($LASTEXITCODE -eq 0) { Info "防火墙已放行 TCP $Port（局域网可访问）" }

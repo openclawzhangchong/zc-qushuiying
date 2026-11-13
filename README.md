@@ -63,11 +63,11 @@ cd webui
 
 ### 后端性能与效果（1280x720，1280 视频实测）
 
-| 后端 | 速度 | 边界干净度 |
-| --- | --- | --- |
-| cv2 | ~0.04 秒/帧 | 简单背景可用；复杂纹理区会有涂抹拉丝 |
-| MI-GAN | ~1.1 秒/帧 | 干净，即梦 logo 区域无痕（推荐） |
-| LaMa | ~3-5 秒/帧 | 最佳，需额外下载约 200 MB 模型 |
+| 后端 | 速度（CPU） | 速度（V100 GPU） | 边界干净度 |
+| --- | --- | --- | --- |
+| cv2 | ~0.04 秒/帧 | 不走 GPU | 简单背景可用；复杂纹理区会有涂抹拉丝 |
+| MI-GAN | ~1.1 秒/帧 | **~0.04 秒/帧** | 干净，即梦 logo 区域无痕（推荐） |
+| LaMa | ~10.8 秒/帧 | **~0.12 秒/帧** | 最佳 |
 
 > 多区域会合并为**一次**前向计算（两个区域从 2.18s/帧降到 1.09s/帧）。
 
@@ -80,6 +80,63 @@ HF_ENDPOINT=https://hf-mirror.com
 ```
 
 也可用系统环境变量永久生效。
+
+### GPU 加速（可选，自动回退）
+
+MI-GAN / LaMa 推理支持 NVIDIA GPU 加速，**默认优先 CUDA，任何环节失败都自动回退 CPU**，不会让任务失败。
+
+| 情况 | 行为 |
+| --- | --- |
+| GPU 可用、显存充足 | 使用 `CUDAExecutionProvider` |
+| 未安装 GPU 版 onnxruntime | 静默使用 CPU |
+| 驱动 / CUDA / cuDNN 缺失 | 静默使用 CPU |
+| 显存不足（< 1 GB 空闲） | 静默使用 CPU |
+| 推理中途 GPU 报错 | 禁用 CUDA 后整段用 CPU 重跑一次 |
+| 想强制 CPU | 设置环境变量 `WEBUI_ONNX_DEVICE=cpu` |
+
+启动后访问 `/api/info` 可看到实际使用的设备、原因和空闲显存。`deploy.ps1` 会自动检测 NVIDIA 显卡并安装 GPU 依赖（用 `-NoGpu` 跳过）。
+
+#### ⚠️ Tesla V100 / Volta（sm_70）注意事项
+
+这是最容易踩的坑，实测结论：
+
+| onnxruntime-gpu | cuDNN | 结果 |
+| --- | --- | --- |
+| 1.31.1 / 1.22.0 / 1.21.1 | 9.x | ❌ `cudaErrorNoKernelImageForDevice`（已移除 sm_70 kernel） |
+| 1.19.2 | 9.28 | ❌ `CUDNN_STATUS_EXECUTION_FAILED_CUDART`（cuDNN 9.12+ 放弃 Volta） |
+| **1.19.2** | **9.10.2.21** | ✅ **可用** |
+
+V100 / P100 / GTX 10xx 等 Volta 及更早架构必须锁定：
+
+```bat
+uv pip install --python .venv\Scripts\python.exe ^
+  "onnxruntime-gpu==1.19.2" "nvidia-cudnn-cu12==9.10.2.21" ^
+  nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cufft-cu12
+```
+
+Turing(sm_75) 及更新架构可自由使用最新版本。
+
+#### V100 实测加速效果（即梦 16 秒视频，393 帧）
+
+| 配置 | 耗时 | 加速 |
+| --- | --- | --- |
+| CPU + MI-GAN | 671 秒 | 1× |
+| **GPU + MI-GAN（默认）** | **38 秒** | **17.5×** |
+| GPU + MI-GAN + 时间一致性 | 354 秒 | 1.9× |
+
+> 时间一致性（光流平滑）在 CPU 上每帧要 +1108ms，而 GPU 填补只要 40ms，因此**默认关闭**，可在界面勾选。关闭后逐帧填补本身足够干净。
+
+单帧基准（1280×720，两个区域）：
+
+| 后端 | CPU | GPU (V100) | 加速 |
+| --- | --- | --- | --- |
+| cv2 | 42 ms | 不走 GPU | — |
+| MI-GAN | 1090 ms | **39 ms** | **28×** |
+| LaMa | 10760 ms | **116 ms** | **93×** |
+
+#### Windows DLL 搜索路径
+
+onnxruntime-gpu 通过 pip 安装的 CUDA/cuDNN DLL 位于 `site-packages/nvidia/*/bin`，Windows 默认不搜索这些目录，不处理会报 `Error 126 ... which is missing`。WebUI 在导入 onnxruntime 前自动调用 `os.add_dll_directory` 注入路径。
 
 ## 目录结构
 

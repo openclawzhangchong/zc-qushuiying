@@ -45,6 +45,11 @@ LOG_LINES = 200
 PORT = int(os.environ.get("PORT", "8000"))
 
 # 国内网络无法直连 huggingface.co；MI-GAN/LaMa 模型下载统一走镜像。
+# 必须在导入上游包之前设置，huggingface_hub 首次调用时读取该变量。
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+
+# 国内网络无法直连 huggingface.co；MI-GAN/LaMa 模型下载统一走镜像。
 # 必须在导入上游包之前设置，huggingface_hub 在首次调用时读取该变量。
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
@@ -62,6 +67,7 @@ class Job:
     mark: str
     trim_end: int = 0       # 剪掉结尾秒数，0 = 不剪
     preset: str = ""        # 擦除区域预设，如 "jimeng"
+    temporal: bool = False  # 时间一致性光流（每帧约 +1.1 秒，默认关闭）
     status: str = "queued"  # queued | running | done | failed | cancelled
     message: str = ""
     created: float = field(default_factory=time.time)
@@ -83,6 +89,7 @@ class Job:
             "mark": self.mark,
             "trim_end": self.trim_end,
             "preset": self.preset,
+            "temporal": self.temporal,
             "status": self.status,
             "message": self.message,
             "created": self.created,
@@ -192,7 +199,7 @@ def run_job(job: Job) -> None:
             job.log.append(f"$ erase preset={job.preset or '-'} regions={regions} backend={job.backend}")
             erased = erase_engine.erase_video_regions(
                 job.input_path, out_path, regions,
-                backend=job.backend, strip_metadata=True, temporal_consistency=True,
+                backend=job.backend, strip_metadata=True, temporal_consistency=job.temporal,
             )
             job.log.append(f"  [webui] 区域擦除完成: {erased} 帧")
             with JOBS_LOCK:
@@ -298,6 +305,13 @@ def cleanup_loop() -> None:
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # 必须在任何推理前安装：MI-GAN/LaMa 优先 CUDA，失败自动回退 CPU
+    try:
+        import gpu_accel
+
+        gpu_accel.install()
+    except Exception as e:  # noqa: BLE001
+        print(f"[gpu] 加速补丁未安装（将使用 CPU）: {e}")
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
     yield
@@ -332,7 +346,14 @@ def index() -> HTMLResponse:
 
 @app.get("/api/info")
 def info() -> dict:
-    return {"ips": lan_ips(), "port": PORT}
+    gpu: dict = {}
+    try:
+        import gpu_accel
+
+        gpu = gpu_accel.status()
+    except Exception as e:  # noqa: BLE001
+        gpu = {"device": "unknown", "reason": str(e)}
+    return {"ips": lan_ips(), "port": PORT, "gpu": gpu}
 
 
 @app.post("/api/upload")
@@ -343,6 +364,7 @@ async def upload(
     mark: str = Form("auto"),
     trim_end: int = Form(0),
     preset: str = Form(""),
+    temporal: int = Form(0),
 ) -> JSONResponse:
     if mode not in MODES:
         raise HTTPException(400, "mode 无效")
@@ -384,7 +406,7 @@ async def upload(
         except Exception:  # noqa: BLE001
             mode = "all"
     job = Job(id=job_id, name=orig, mode=mode, backend=backend, mark=mark,
-              trim_end=trim_end, preset=preset, input_path=in_path)
+              trim_end=trim_end, preset=preset, temporal=bool(temporal), input_path=in_path)
     with JOBS_LOCK:
         JOBS[job_id] = job
     WORKER_WAKE.set()

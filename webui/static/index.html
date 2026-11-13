@@ -94,6 +94,12 @@ a.dl { color:var(--ok); font-size:13px; }
           <option value="vidu">Vidu</option>
         </select>
       </div>
+      <div class="field" id="temporalField" style="display:none;">
+        <label>时间一致性（可选）</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;padding:8px 10px;background:#10131a;border:1px solid var(--line);border-radius:8px;cursor:pointer;">
+          <input type="checkbox" id="temporal" style="accent-color:#6c8cff;"> 光流平滑（每帧约 +1.1 秒，慢约 20 倍）
+        </label>
+      </div>
       <div class="field">
         <label>结尾处理（可选）</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;padding:8px 10px;background:#10131a;border:1px solid var(--line);border-radius:8px;cursor:pointer;">
@@ -114,6 +120,7 @@ a.dl { color:var(--ok); font-size:13px; }
 
   <div class="foot">
     局域网内其他设备请访问：<code id="lanurl">…</code><br>
+    推理设备：<code id="gpuInfo">检测中…</code><br>
     仅用于处理你自己生成的内容 · 后端 <code>remove-ai-watermarks</code> v0.60.0 · 输出文件保留 24 小时
   </div>
 </div>
@@ -132,6 +139,7 @@ function syncModeUi() {
   // auto 模式下预设由服务端按识别结果决定，但允许用户先看一眼
   presetField.style.display = (isErase || m === 'auto') ? '' : 'none';
   presetField.style.opacity = isErase ? '1' : '.65';
+  $('#temporalField').style.display = isErase ? '' : 'none';
   markField.style.display = m === 'all' ? '' : 'none';
   if (isErase && backendSel.value === 'cv2') backendSel.value = 'migan';
   $('#preset').disabled = !isErase;
@@ -161,6 +169,7 @@ btn.onclick = async () => {
   fd.append('backend', $('#backend').value);
   fd.append('mark', $('#mark').value);
   fd.append('trim_end', $('#trimEnd').checked ? '5' : '0');
+  fd.append('temporal', $('#temporal').checked ? '1' : '0');
   fd.append('preset', $('#preset').value || '');
   try {
     const r = await fetch('/api/upload', { method:'POST', body: fd });
@@ -210,6 +219,14 @@ setInterval(refresh, 2000);
 fetch('/api/info').then(r=>r.json()).then(d => {
   const ip = d.ips && d.ips[0];
   if (ip) $('#lanurl').textContent = `http://${ip}:${d.port}/`;
+  const g = d.gpu || {};
+  if (g.device === 'cuda') {
+    $('#gpuInfo').textContent = `GPU 加速 (CUDA)${g.free_vram_mb ? ' · 空闲显存 ' + g.free_vram_mb + 'MB' : ''}`;
+    $('#gpuInfo').style.color = '#3ecf8e';
+  } else {
+    $('#gpuInfo').textContent = `CPU${g.reason ? ' · ' + g.reason : ''}`;
+    $('#gpuInfo').style.color = '#8b93a3';
+  }
 }).catch(()=>{});
 </script>
 </body>
