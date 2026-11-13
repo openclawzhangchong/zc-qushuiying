@@ -190,18 +190,54 @@ def run_job(job: Job) -> None:
     if job.mode == "erase":
         try:
             import erase_engine
+            import jimeng_detect
 
-            regions = []
+            regions: list = []
             if job.preset == "jimeng":
                 w, h, _ = erase_engine.probe_geometry(job.input_path)
-                regions = erase_engine.jimeng_regions(w, h)
+                # 即梦的 logo 会在四个角之间**分时轮换**（实测每 4 秒换一个角），
+                # 而且 @昵称 长度因人而异。所以不能写死一个区域，必须逐帧定位。
+                job.log.append("$ 正在自动定位即梦水印（四角 + 昵称长度自适应）...")
+                timeline = jimeng_detect.detect_timeline(job.input_path)
+                if timeline:
+                    for s, e, b in timeline:
+                        job.log.append(
+                            f"  [detect] 帧 {s}-{e - 1} 区域 {b} ({b[2]}x{b[3]})"
+                        )
+                    regions = jimeng_detect.regions_by_frame(timeline, w, h)
+                else:
+                    # 检测失败时退化为固定四角全覆盖，宁可多擦也不漏水印
+                    job.log.append("  [detect] 未定位到 logo，回退为固定四角全覆盖")
+                    regions = erase_engine.jimeng_regions(w, h)
             if not regions:
                 raise RuntimeError("未指定可用的擦除区域")
-            job.log.append(f"$ erase preset={job.preset or '-'} regions={regions} backend={job.backend}")
-            erased = erase_engine.erase_video_regions(
-                job.input_path, out_path, regions,
-                backend=job.backend, strip_metadata=True, temporal_consistency=job.temporal,
+            job.log.append(
+                f"$ erase preset={job.preset or '-'} backend={job.backend} "
+                f"regions={'逐帧定位' if regions and isinstance(regions[0], list) else '静态'}"
             )
+            try:
+                erased = erase_engine.erase_video_regions(
+                    job.input_path, out_path, regions,
+                    backend=job.backend, strip_metadata=True, temporal_consistency=job.temporal,
+                )
+            except Exception as gpu_err:  # noqa: BLE001
+                # GPU 在真实推理中途失败（如 Volta 缺 kernel、显存抖动）时，
+                # 禁用 CUDA 后用 CPU 完整重跑一次，保证用户总能拿到结果。
+                job.log.append(f"  [gpu] 加速推理失败，回退 CPU 重试: {gpu_err}")
+                os.environ["WEBUI_ONNX_DEVICE"] = "cpu"
+                try:
+                    import gpu_accel
+
+                    gpu_accel.reset()
+                except Exception:  # noqa: BLE001
+                    pass
+                shutil.rmtree(OUTPUT_DIR / job.id, ignore_errors=True)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                erased = erase_engine.erase_video_regions(
+                    job.input_path, out_path, regions,
+                    backend=job.backend, strip_metadata=True, temporal_consistency=job.temporal,
+                )
+                job.log.append("  [gpu] 已回退 CPU 完成")
             job.log.append(f"  [webui] 区域擦除完成: {erased} 帧")
             with JOBS_LOCK:
                 if job.status != "cancelled":

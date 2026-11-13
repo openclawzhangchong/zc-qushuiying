@@ -42,10 +42,13 @@ from remove_ai_watermarks.watermark_registry import fill, resolve_backend
 Region = tuple[int, int, int, int]
 
 # 即梦 / Dreamina（字节跳动）视频水印预设区域，按 1280x720 实测标定，以帧比例表达。
-# 左上：灰色药丸 "AI生成"；右下：彩色 logo + "即梦" 渐变字 + 作者名。
+# 保留作为「检测失败时的保守兜底」：当自动定位拿不到结果时，用这几个角
+# 的固定区域全部擦一遍，避免漏掉水印（宁可多擦，也不能留水印）。
 JIMENG_REGIONS_RELATIVE: tuple[tuple[float, float, float, float], ...] = (
-    (0.0047, 0.0111, 0.0625, 0.0556),   # 左上 AI生成 药丸
+    (0.0047, 0.0111, 0.0625, 0.0556),   # 左上 AI生成 药丸（整片常驻）
     (0.8242, 0.7333, 0.1328, 0.1500),   # 右下 即梦 logo + 作者名
+    (0.0200, 0.7300, 0.1900, 0.1600),   # 左下（分时轮换位）
+    (0.8200, 0.0500, 0.1800, 0.1500),   # 右上（分时轮换位）
 )
 
 
@@ -121,7 +124,7 @@ def _variable_timestamps(timestamps: tuple[float, ...], time_base: Fraction) -> 
 def erase_video_regions(
     source: Path,
     output: Path,
-    regions: list[Region],
+    regions: list[Region] | list[list[Region]],
     *,
     backend: str = "cv2",
     strip_metadata: bool = True,
@@ -133,7 +136,16 @@ def erase_video_regions(
     Mirrors upstream ``encode_clean_video`` but takes static user regions
     (multiple per frame) instead of per-mark detector output. Returns the
     number of erased frames.
+
+    ``regions`` accepts two shapes:
+
+    * ``list[Region]`` — one fixed set of boxes applied to every frame
+      (manual boxes, single-position presets).
+    * ``list[list[Region]]`` — a **per-frame** region list, used by the
+      Jimeng preset whose logo hops between corners over time.
     """
+    per_frame: bool = isinstance(regions, list) and len(regions) > 0 and \
+        isinstance(regions[0], list)
     if not regions:
         return 0
     resolved_backend = resolve_backend(backend)  # type: ignore[arg-type]
@@ -206,8 +218,11 @@ def erase_video_regions(
                 if not ok:
                     raise RuntimeError(f"Video ended while reading frame {frame_index}: {source}")
                 source_frame = frame
+                frame_regions = regions[frame_index] if per_frame else regions
+                if per_frame and frame_index >= len(regions):
+                    frame_regions = []
                 combined_mask: np.ndarray | None = None
-                for region in regions:
+                for region in frame_regions:  # type: ignore[union-attr]
                     mask = _mask_for_region(
                         frame,
                         region,
