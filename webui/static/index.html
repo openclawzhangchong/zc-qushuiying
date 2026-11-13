@@ -60,19 +60,27 @@ a.dl { color:var(--ok); font-size:13px; }
       <div class="field">
         <label>处理模式</label>
         <select id="mode">
-          <option value="all">去可见水印 + 清 AI 元数据（推荐）</option>
+          <option value="auto">自动识别来源（推荐：即梦自动擦除）</option>
+          <option value="all">去可见水印 + 清 AI 元数据（Sora/Veo 等）</option>
+          <option value="erase">手动/预设区域擦除</option>
           <option value="metadata">仅清 AI 元数据（不重编码）</option>
+        </select>
+      </div>
+      <div class="field" id="presetField" style="display:none;">
+        <label>擦除区域预设</label>
+        <select id="preset">
+          <option value="jimeng">即梦 / Dreamina（左上药丸 + 右下 logo）</option>
         </select>
       </div>
       <div class="field">
         <label>填充后端</label>
         <select id="backend">
-          <option value="cv2">cv2 · 快速（默认）</option>
-          <option value="migan">MI-GAN · 质量更好（首次用需联网下模型）</option>
-          <option value="lama">LaMa · 质量最好（首次用需联网下模型）</option>
+          <option value="cv2">cv2 · 极快（约 0.04 秒/帧，复杂背景会有涂抹痕）</option>
+          <option value="migan">MI-GAN · 效果干净（约 1.1 秒/帧，推荐）</option>
+          <option value="lama">LaMa · 质量最好（约 3-5 秒/帧）</option>
         </select>
       </div>
-      <div class="field">
+      <div class="field" id="markField">
         <label>水印类型</label>
         <select id="mark">
           <option value="auto">自动检测全部（默认）</option>
@@ -115,6 +123,22 @@ const $ = s => document.querySelector(s);
 const drop = $('#drop'), input = $('#file'), btn = $('#btn');
 let selectedFile = null;
 
+const modeSel = $('#mode'), presetField = $('#presetField'), markField = $('#markField');
+const backendSel = $('#backend');
+
+function syncModeUi() {
+  const m = modeSel.value;
+  const isErase = m === 'erase';
+  // auto 模式下预设由服务端按识别结果决定，但允许用户先看一眼
+  presetField.style.display = (isErase || m === 'auto') ? '' : 'none';
+  presetField.style.opacity = isErase ? '1' : '.65';
+  markField.style.display = m === 'all' ? '' : 'none';
+  if (isErase && backendSel.value === 'cv2') backendSel.value = 'migan';
+  $('#preset').disabled = !isErase;
+}
+modeSel.onchange = syncModeUi;
+syncModeUi();
+
 drop.onclick = () => input.click();
 input.onchange = () => pick(input.files[0]);
 drop.ondragover = e => { e.preventDefault(); drop.classList.add('hover'); };
@@ -137,6 +161,7 @@ btn.onclick = async () => {
   fd.append('backend', $('#backend').value);
   fd.append('mark', $('#mark').value);
   fd.append('trim_end', $('#trimEnd').checked ? '5' : '0');
+  fd.append('preset', $('#preset').value || '');
   try {
     const r = await fetch('/api/upload', { method:'POST', body: fd });
     if (!r.ok) { const e = await r.json().catch(()=>({})); alert('上传失败: ' + (e.detail || r.status)); }
@@ -163,7 +188,7 @@ async function refresh() {
         <button class="btn-s" onclick="del('${j.id}')">删除</button>
         ${j.status==='running'||j.status==='queued' ? `<button class="btn-s" onclick="cancelJob('${j.id}')">取消</button>` : ''}</div>
     </div>
-    <div class="meta">${fmtDate(j.created)} · 模式: ${j.mode==='all'?'去水印+元数据':'仅元数据'} · 后端: ${j.backend}${j.trim_end>0 ? ' · 剪尾 '+j.trim_end+' 秒' : ''} · 已用 ${fmtTime(j.elapsed)}</div>`;
+    <div class="meta">${fmtDate(j.created)} · 模式: ${{auto:'自动识别',all:'去水印+元数据',erase:'区域擦除',metadata:'仅元数据'}[j.mode] || j.mode}${j.preset?' · 预设 '+j.preset:''} · 后端: ${j.backend}${j.trim_end>0 ? ' · 剪尾 '+j.trim_end+' 秒' : ''} · 已用 ${fmtTime(j.elapsed)}</div>`;
     if (j.status === 'running') inner += `<div class="progress"><i></i></div>`;
     if (j.message) inner += `<div class="meta">${escapeHtml(j.message)}</div>`;
     if (j.status === 'done' && j.media_url) {

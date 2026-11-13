@@ -36,9 +36,18 @@ STATIC_DIR = WEBUI_DIR / "static"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".flv"}
 BACKENDS = {"cv2", "migan", "lama"}
 MARKS = {"auto", "sora", "veo", "seedance", "doubao", "dola", "hailuo", "kling", "vidu"}
+# 处理模式：auto=自动识别来源选策略；all=自动检测可见水印+元数据；metadata=仅元数据；erase=手动/预设区域擦除
+MODES = {"auto", "all", "metadata", "erase"}
+# 区域预设
+ERASE_PRESETS = {"jimeng": "即梦 / Dreamina（左上药丸 + 右下 logo）"}
 JOB_TTL_HOURS = 24
 LOG_LINES = 200
 PORT = int(os.environ.get("PORT", "8000"))
+
+# 国内网络无法直连 huggingface.co；MI-GAN/LaMa 模型下载统一走镜像。
+# 必须在导入上游包之前设置，huggingface_hub 在首次调用时读取该变量。
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,10 +57,11 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 class Job:
     id: str
     name: str               # display filename
-    mode: str               # "all" | "metadata"
+    mode: str               # "all" | "metadata" | "erase"
     backend: str
     mark: str
     trim_end: int = 0       # 剪掉结尾秒数，0 = 不剪
+    preset: str = ""        # 擦除区域预设，如 "jimeng"
     status: str = "queued"  # queued | running | done | failed | cancelled
     message: str = ""
     created: float = field(default_factory=time.time)
@@ -72,6 +82,7 @@ class Job:
             "backend": self.backend,
             "mark": self.mark,
             "trim_end": self.trim_end,
+            "preset": self.preset,
             "status": self.status,
             "message": self.message,
             "created": self.created,
@@ -161,6 +172,52 @@ def run_job(job: Job) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     ext = job.input_path.suffix.lower()
     out_path = out_dir / f"clean{ext}"
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    # 国内网络无法直连 huggingface.co；未显式配置时走镜像，保证 MI-GAN/LaMa 模型可下载。
+    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+    # 手动/预设区域擦除走独立引擎（上游未把即梦等水印注册进视频检测表）
+    if job.mode == "erase":
+        try:
+            import erase_engine
+
+            regions = []
+            if job.preset == "jimeng":
+                w, h, _ = erase_engine.probe_geometry(job.input_path)
+                regions = erase_engine.jimeng_regions(w, h)
+            if not regions:
+                raise RuntimeError("未指定可用的擦除区域")
+            job.log.append(f"$ erase preset={job.preset or '-'} regions={regions} backend={job.backend}")
+            erased = erase_engine.erase_video_regions(
+                job.input_path, out_path, regions,
+                backend=job.backend, strip_metadata=True, temporal_consistency=True,
+            )
+            job.log.append(f"  [webui] 区域擦除完成: {erased} 帧")
+            with JOBS_LOCK:
+                if job.status != "cancelled":
+                    job.status = "done"
+                    job.output_path = out_path
+                    job.output_name = f"clean_{Path(job.name).stem}{ext}"
+                    label = ERASE_PRESETS.get(job.preset, job.preset)
+                    job.message = f"已擦除 {label} 区域 {erased} 帧（后端 {job.backend}）并清理 AI 元数据"
+        except Exception as e:  # noqa: BLE001
+            job.log.append(f"  [webui] 擦除失败: {e}")
+            with JOBS_LOCK:
+                if job.status != "cancelled":
+                    job.status = "failed"
+                    job.message = f"区域擦除失败: {e}"
+        finally:
+            with JOBS_LOCK:
+                job.finished = time.time()
+        if job.status == "done" and job.output_path and job.trim_end > 0:
+            note = trim_video_end(out_path, job.trim_end, job.log)
+            if note:
+                with JOBS_LOCK:
+                    job.message += f"；{note}"
+        return
+
     if job.mode == "metadata":
         cmd = [str(CLI), "video", "metadata", str(job.input_path), "--remove", "-o", str(out_path)]
     else:
@@ -168,9 +225,7 @@ def run_job(job: Job) -> None:
             str(CLI), "video", "all", str(job.input_path), "-o", str(out_path),
             "--backend", job.backend, "--mark", job.mark,
         ]
-    env = dict(os.environ)
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUTF8"] = "1"
+
     job.log.append(f"$ {' '.join(cmd[1:])}")
     try:
         proc = subprocess.Popen(
@@ -287,8 +342,9 @@ async def upload(
     backend: str = Form("cv2"),
     mark: str = Form("auto"),
     trim_end: int = Form(0),
+    preset: str = Form(""),
 ) -> JSONResponse:
-    if mode not in {"all", "metadata"}:
+    if mode not in MODES:
         raise HTTPException(400, "mode 无效")
     if backend not in BACKENDS:
         raise HTTPException(400, "backend 无效")
@@ -296,6 +352,10 @@ async def upload(
         raise HTTPException(400, "mark 无效")
     if trim_end < 0 or trim_end > 60:
         raise HTTPException(400, "trim_end 需在 0-60 秒之间")
+    if preset and preset not in ERASE_PRESETS:
+        raise HTTPException(400, "preset 无效")
+    if mode == "erase" and not preset:
+        raise HTTPException(400, "擦除模式需要选择区域预设")
     orig = Path(file.filename or "video.mp4").name
     ext = Path(orig).suffix.lower()
     if ext not in VIDEO_EXTS:
@@ -310,11 +370,44 @@ async def upload(
     if size == 0:
         in_path.unlink(missing_ok=True)
         raise HTTPException(400, "空文件")
-    job = Job(id=job_id, name=orig, mode=mode, backend=backend, mark=mark, trim_end=trim_end, input_path=in_path)
+    # auto 模式：先看容器来源，即梦/Dreamina 走区域擦除 + MI-GAN，其余走上游自动检测
+    if mode == "auto":
+        try:
+            import erase_engine
+
+            if erase_engine.detect_jimeng(in_path):
+                mode, preset = "erase", "jimeng"
+                if backend == "cv2":
+                    backend = "migan"
+            else:
+                mode = "all"
+        except Exception:  # noqa: BLE001
+            mode = "all"
+    job = Job(id=job_id, name=orig, mode=mode, backend=backend, mark=mark,
+              trim_end=trim_end, preset=preset, input_path=in_path)
     with JOBS_LOCK:
         JOBS[job_id] = job
     WORKER_WAKE.set()
     return {"id": job_id}
+
+
+@app.post("/api/detect/{job_id}")
+def detect_source(job_id: str) -> dict:
+    """识别已上传视频的来源，供前端自动预选擦除预设。"""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job or not job.input_path or not job.input_path.exists():
+            raise HTTPException(404, "job not found")
+        path = job.input_path
+    try:
+        import erase_engine
+
+        jimeng = erase_engine.detect_jimeng(path)
+    except Exception:  # noqa: BLE001
+        jimeng = False
+    return {"jimeng": jimeng, "suggest_mode": "erase" if jimeng else "all",
+            "suggest_preset": "jimeng" if jimeng else "",
+            "suggest_backend": "migan" if jimeng else "cv2"}
 
 
 @app.get("/api/jobs")

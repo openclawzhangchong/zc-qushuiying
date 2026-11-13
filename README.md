@@ -7,6 +7,8 @@
 ## 功能
 
 - 拖拽 / 点击上传视频，支持 mp4 / mov / m4v / webm / mkv / avi / flv
+- **自动识别来源**：检测到即梦 / Dreamina 导出时，自动切换到区域擦除 + MI-GAN
+- **区域擦除模式**：处理上游未注册的可见水印（即梦左上「AI生成」药丸 + 右下 logo/作者名）
 - 自动检测并移除已注册的可见 AI 水印：Sora 2、Veo、Seedance、豆包、Dola、海螺 AI、Kling AI、Vidu 等
 - 清除 AI 元数据：C2PA、EXIF/XMP 生成参数、中国 TC260 `AIGC` 标签等（不重编码视频流）
 - 填充后端可选：cv2（快速、纯本地）/ MI-GAN / LaMa（质量更好，首次使用联网下载模型）
@@ -49,6 +51,36 @@ cd webui
 
 > 需要已安装 [uv](https://docs.astral.sh/uv/)（`pip install uv` 或官方安装脚本）。国内网络克隆/下载失败时，可在 clone 地址前加镜像前缀，例如 `https://ghfast.top/https://github.com/...`。
 
+## 为什么需要区域擦除模式
+
+上游的视频可见水印检测表只注册了 8 个厂商：`sora / veo / seedance / doubao / dola / hailuo / vidu / kling`。**即梦（Jimeng / Dreamina）不在其中**，这是上游的主动决定而非疏漏——`docs/module-internals.md` 记录该水印被 PARKED：
+
+> 即梦 CN 水印在视频上模板匹配分不开正负样本（1/5 正样本 vs 2/25 负样本），左上「AI生成」药丸的误报模式是静态纹理角，时间递归仲裁器无法拦截。
+
+所以对即梦视频跑 `video all` 会得到「未检测到可见水印」，直接输出直通版本——三个填充后端都没有机会工作。
+
+`webui/erase_engine.py` **不修改上游注册表**，而是复用上游同一条逐帧填充与原子编码管线（同样的 cv2 / MI-GAN / LaMa 后端、色彩档案、VFR 时间戳、HDR 拒绝、音频流复制、元数据剥离），接受手动或预设区域直接擦除。即梦预设区域按 1280x720 实测标定，并按帧尺寸等比缩放。
+
+### 后端性能与效果（1280x720，1280 视频实测）
+
+| 后端 | 速度 | 边界干净度 |
+| --- | --- | --- |
+| cv2 | ~0.04 秒/帧 | 简单背景可用；复杂纹理区会有涂抹拉丝 |
+| MI-GAN | ~1.1 秒/帧 | 干净，即梦 logo 区域无痕（推荐） |
+| LaMa | ~3-5 秒/帧 | 最佳，需额外下载约 200 MB 模型 |
+
+> 多区域会合并为**一次**前向计算（两个区域从 2.18s/帧降到 1.09s/帧）。
+
+### 国内网络：HuggingFace 镜像
+
+MI-GAN / LaMa 模型从 HuggingFace 下载，国内直连会超时。WebUI 启动时自动设置：
+
+```
+HF_ENDPOINT=https://hf-mirror.com
+```
+
+也可用系统环境变量永久生效。
+
 ## 目录结构
 
 ```
@@ -56,7 +88,8 @@ zc-qushuiying/
 ├── deploy.ps1        # 一键部署：克隆上游、装 WebUI、装依赖、放行防火墙
 ├── start.bat         # 启动 WebUI（自动定位部署目录）
 ├── webui/
-│   ├── app.py        # FastAPI 服务：上传 / 任务队列 / 预览(Range) / 下载
+│   ├── app.py        # FastAPI 服务：上传 / 任务队列 / 预览(Range) / 下载 / 自动识别
+│   ├── erase_engine.py  # 区域擦除引擎（复用上游填充与编码管线）
 │   └── static/
 │       └── index.html  # 中文单页界面（无外部 CDN 依赖）
 └── remove-ai-watermarks/   # 部署时克隆的上游代码（不入库）
@@ -76,6 +109,7 @@ WebUI（FastAPI）把上传的视频交给上游 CLI 的 `video all` / `video me
 | 内容 | 说明 |
 | --- | --- |
 | `webui/` | 全新中文 WebUI：上传、任务队列、进度日志、Range 预览、下载、自动清理 |
+| `webui/erase_engine.py` | 区域擦除引擎：绕过上游未注册的即梦水印，复用同一填充/编码管线 |
 | `deploy.ps1` / `start.bat` | Windows 一键部署与启动，含防火墙放行与克隆镜像回退 |
 | 上游代码 | 不入库，部署时从官方仓库克隆，保持 `uv.lock` 锁定版本 |
 
