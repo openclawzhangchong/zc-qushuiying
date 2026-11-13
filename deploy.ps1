@@ -18,6 +18,17 @@ $upstream = Join-Path $repoRoot "remove-ai-watermarks"
 
 function Info($msg) { Write-Host "[zc-qushuiying] $msg" -ForegroundColor Cyan }
 
+# 在 $ErrorActionPreference = "Stop" 下，PS 5.1 会把原生命令写到 stderr 的
+# 普通进度输出（git clone 的 "Cloning into..."、nvidia-smi 的告警等）转成
+# 终止性错误，脚本会死在第一步克隆、连镜像回退都执行不到。
+# 因此所有原生命令都必须包在临时 EAP=Continue 里，用 $LASTEXITCODE 判成败。
+function Invoke-Native([scriptblock]$cmd) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $cmd; return $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+}
+
 # 1. 依赖检查：git / uv
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Host "未找到 git，请先安装 Git for Windows。" -ForegroundColor Red
@@ -41,8 +52,8 @@ if (-not (Test-Path (Join-Path $upstream ".git"))) {
     )
     $ok = $false
     foreach ($u in $urls) {
-        git clone --depth 1 $u $upstream 2>$null
-        if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+        $rc = Invoke-Native { git clone --depth 1 --quiet $u $upstream }
+        if ($rc -eq 0) { $ok = $true; break }
         Info "克隆失败（$u），尝试下一个源..."
     }
     if (-not $ok) { Write-Host "上游克隆失败，请检查网络。" -ForegroundColor Red; exit 1 }
@@ -71,11 +82,18 @@ if (Test-Path $srcStart) {
 }
 
 # 4. 安装依赖（uv.lock 锁定版本，含便携版 ffmpeg）
-Info "安装依赖（video + migan，首次较慢）..."
+# 国内直连 pypi.org 会卡住（实测十几分钟无进展），uv 尊重 UV_DEFAULT_INDEX，
+# 与 pip 的阿里云镜像策略保持一致（见 docs/gpu-and-ops-notes.md 8.2）。
+$env:UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple/"
+Info "安装依赖（video + migan，阿里云镜像，首次较慢）..."
 Push-Location $upstream
 try {
-    uv sync --frozen --extra video --extra migan
-    if ($LASTEXITCODE -ne 0) { throw "uv sync 失败" }
+    $rc = Invoke-Native { uv sync --frozen --extra video --extra migan }
+    if ($rc -ne 0) { throw "uv sync 失败" }
+    # WebUI 运行时依赖：上游 pyproject 不声明 fastapi/uvicorn（它的 webui
+    # 是独立的），全新 venv 里必须显式安装，否则 app.py 起不来。
+    $rc = Invoke-Native { uv pip install --python .venv\Scripts\python.exe fastapi uvicorn python-multipart }
+    if ($rc -ne 0) { throw "WebUI 依赖安装失败" }
 }
 finally {
     Pop-Location
@@ -83,17 +101,20 @@ finally {
 
 # 6. 可选：安装 GPU 加速（NVIDIA 显卡，MI-GAN/LaMa 推理提速）
 if (-not $NoGpu) {
-    $gpu = (nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1)
+    $gpu = (Invoke-Native { nvidia-smi --query-gpu=name --format=csv,noheader } |
+            Select-Object -First 1)
     if ($gpu) {
         Info "检测到 NVIDIA GPU: $gpu，安装 onnxruntime-gpu + CUDA 运行时..."
         $py = Join-Path $upstream ".venv\Scripts\python.exe"
         # onnxruntime-gpu 1.19.2 + cuDNN 9.10.2.21 是仍支持 Volta(sm_70) 的组合；
         # 更新的 ORT 在 V100 上报 cudaErrorNoKernelImageForDevice，
         # 更新的 cuDNN(9.12+) 在 V100 上报 CUDNN_STATUS_EXECUTION_FAILED_CUDART。
-        & uv pip install --python $py `
-            "onnxruntime-gpu==1.19.2" "nvidia-cudnn-cu12==9.10.2.21" `
-            "nvidia-cublas-cu12" "nvidia-cuda-runtime-cu12" "nvidia-cufft-cu12"
-        if ($LASTEXITCODE -eq 0) { Info "GPU 推理依赖已安装（启动时自动优先 CUDA，失败回退 CPU）" }
+        $rc = Invoke-Native {
+            uv pip install --python $py `
+                "onnxruntime-gpu==1.19.2" "nvidia-cudnn-cu12==9.10.2.21" `
+                "nvidia-cublas-cu12" "nvidia-cuda-runtime-cu12" "nvidia-cufft-cu12"
+        }
+        if ($rc -eq 0) { Info "GPU 推理依赖已安装（启动时自动优先 CUDA，失败回退 CPU）" }
         else { Info "GPU 依赖安装失败，将使用 CPU（功能不受影响）" }
     }
     else {
@@ -103,8 +124,10 @@ if (-not $NoGpu) {
 
 # 7. 防火墙放行（需要管理员权限，失败不影响部署）
 if (-not $NoFirewall) {
-    netsh advfirewall firewall add rule name="Remove AI Watermarks WebUI" dir=in action=allow protocol=TCP localport=$Port | Out-Null
-    if ($LASTEXITCODE -eq 0) { Info "防火墙已放行 TCP $Port（局域网可访问）" }
+    $rc = Invoke-Native {
+        netsh advfirewall firewall add rule name="Remove AI Watermarks WebUI" dir=in action=allow protocol=TCP localport=$Port
+    }
+    if ($rc -eq 0) { Info "防火墙已放行 TCP $Port（局域网可访问）" }
     else { Info "防火墙放行失败（可能无管理员权限），局域网访问时需手动放行。" }
 }
 
