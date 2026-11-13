@@ -53,11 +53,49 @@ JIMENG_REGIONS_RELATIVE: tuple[tuple[float, float, float, float], ...] = (
 
 
 def jimeng_regions(width: int, height: int) -> list[Region]:
-    """Scale the measured Jimeng/Dreamina preset regions to a frame size."""
-    return [
-        (round(width * x), round(height * y), round(width * w), round(height * h))
-        for x, y, w, h in JIMENG_REGIONS_RELATIVE
+    """Scale the measured Jimeng/Dreamina preset regions to a frame size.
+
+    16:9 分辨率直接按比例缩放实测框。**非 16:9（竖屏等）上比例框会整体
+    错位**——比例标定隐含了「logo 距底约 0.73~0.88 帧高」这类横向假设，
+    竖屏时 logo 实际贴着角（距底仅约 90px 甚至更近），比例框擦不到。
+    因此非 16:9 改用 720p 设计尺寸的角部锚定框，同时覆盖两种叠加物
+    缩放假设：
+
+    - 保持绝对像素尺寸：logo 块约 143×80，距角 55~90px；
+    - 随帧宽等比缩放：块更小、更贴近角（k = W/1280 倍）。
+
+    锚定框从「最远的布局」一直画到角，两种假设都能盖住。宁可多擦，
+    不能漏水印；这是检测失败后的兜底路径，多擦无观感损失。
+    """
+    if abs(height * 16 - width * 9) <= max(2, round(width * 0.002)):
+        return [
+            (round(width * x), round(height * y), round(width * w), round(height * h))
+            for x, y, w, h in JIMENG_REGIONS_RELATIVE
+        ]
+
+    # 药丸：与 jimeng_detect.pill_region 相同的三假设并集（保持模块独立，
+    # 不引入反向依赖）
+    rx, ry, rw, rh = 0.0047, 0.0111, 0.0625, 0.0556
+    k = width / 1280.0
+    pill_boxes = [
+        (round(width * rx), round(height * ry), round(width * rw), round(height * rh)),
+        (round(6 * k), round(8 * k), round(80 * k), round(40 * k)),
+        (6, 8, 80, 40),
     ]
+    px1 = min(b[0] for b in pill_boxes)
+    py1 = min(b[1] for b in pill_boxes)
+    px2 = max(b[0] + b[2] for b in pill_boxes)
+    py2 = max(b[1] + b[3] for b in pill_boxes)
+    pill: Region = (px1, py1, px2 - px1, py2 - py1)
+
+    # 三个 logo 位（1280x720 实测设计尺寸，锚定到各自角）：
+    #   右下：块右缘距右边 76、外沿距底 90 → 从 (W-219, H-169) 画到角
+    #   左下：块 x 55..203、下缘距底 11     → 从 (0, H-106) 画到角
+    #   右上：块右缘距右边 62、顶距 61      → 从 (W-199, 0) 画到 (W, 143)
+    br: Region = (max(0, width - 219), max(0, height - 169), 219, 169)
+    bl: Region = (0, max(0, height - 106), 203, 106)
+    tr: Region = (max(0, width - 199), 0, 199, min(143, height))
+    return [pill, br, bl, tr]
 
 
 def detect_jimeng(source: Path) -> bool:

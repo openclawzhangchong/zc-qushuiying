@@ -58,6 +58,24 @@ PILL_REL: tuple[float, float, float, float] = (0.0047, 0.0111, 0.0625, 0.0556)
 _WHITE_V = 178
 _WHITE_S = 90
 
+# 单个角窗口内白色像素占比超过该值时判定「背景过亮，白色判据失效」：
+# 浅色/近白背景会把水印笔画和背景粘成一片，此时检出的"字形"不可信，
+# 实测会给出随机位置的假命中。返回 None 交给上层走四角兜底。
+# 真实水印块的白占比在 1%~14%（实测），大面积浅色背景在 40%+，阈值取中间。
+_MAX_WHITE_RATIO = 0.30
+
+# 1280×720 实测标定的绝对像素阈值。帧宽 <1280 时按比例放宽（竖屏水印若
+# 随宽度缩放，字形会比横屏标定小），帧宽 ≥1280 时保持原值——不因放大而
+# 收紧，避免误伤"保持绝对像素尺寸的叠加物"。
+_CALIB_WIDTH = 1280
+
+
+def _adaptive(px: int, frame_width: int, *, lo: int) -> int:
+    """Scale an absolute pixel threshold with frame width (floor at ``lo``)."""
+    if frame_width >= _CALIB_WIDTH:
+        return px
+    return max(lo, int(round(px * frame_width / _CALIB_WIDTH)))
+
 
 @dataclass(frozen=True)
 class LogoHit:
@@ -76,8 +94,25 @@ def _white_mask(img: np.ndarray) -> np.ndarray:
             .astype(np.uint8) * 255)
 
 
-def _glyphs(img: np.ndarray) -> list[dict]:
-    """White/highlight connected components that look like glyphs."""
+def _glyphs(img: np.ndarray, frame_width: int | None = None) -> list[dict]:
+    """White/highlight connected components that look like glyphs.
+
+    返回的字形带 ``strong`` 标记：强档（面积/填充率达到 1280×720 标定值）
+    才有资格当 wordmark 候选；弱档仅供昵称行使用——昵称里的简单字
+    （「十」「三」「之」「语」）笔画细、白色核心面积小，按强档阈值会被
+    整字丢弃，导致昵称链中断（实测 @+12 字昵称被拦腰截断，框宽只有
+    真实宽度的 46%）。
+
+    ``frame_width`` 用于缩放绝对像素阈值：默认从窗口宽度反推
+    （窗口恒为帧宽的 ``WINDOW_W_FRAC``）。
+    """
+    fw = frame_width or max(1, int(round(img.shape[1] / WINDOW_W_FRAC)))
+    strong_area = _adaptive(110, fw, lo=30)
+    strong_fill = 0.13
+    base_area = _adaptive(40, fw, lo=12)
+    base_fill = 0.08
+    bh_min = _adaptive(11, fw, lo=5)
+    bw_min = _adaptive(5, fw, lo=2)
     mask = cv2.morphologyEx(_white_mask(img), cv2.MORPH_CLOSE,
                             np.ones((3, 3), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -85,17 +120,19 @@ def _glyphs(img: np.ndarray) -> list[dict]:
     for c in contours:
         x, y, bw, bh = cv2.boundingRect(c)
         area = float(cv2.contourArea(c))
-        if area < 110 or bh < 11 or bw < 5:
+        if area < base_area or bh < bh_min or bw < bw_min:
             continue
         if bh > 170 or bw > 340:
             continue
-        if area / max(1, bw * bh) < 0.13:      # 填充率过低 = 细长噪点
+        fill = area / max(1, bw * bh)
+        if fill < base_fill:                   # 填充率过低 = 细长噪点
             continue
-        out.append({"x": x, "y": y, "w": bw, "h": bh, "area": area})
+        out.append({"x": x, "y": y, "w": bw, "h": bh, "area": area,
+                    "strong": area >= strong_area and fill >= strong_fill})
     return out
 
 
-def _find_wordmark(glyphs: list[dict]) -> list[dict] | None:
+def _find_wordmark(glyphs: list[dict], frame_width: int | None = None) -> list[dict] | None:
     """The "即梦" wordmark: all same-height glyphs on one text line.
 
     注意：不能只取「前两块」。中文笔画常被白色掩码切成多个连通域——
@@ -105,7 +142,10 @@ def _find_wordmark(glyphs: list[dict]) -> list[dict] | None:
 
     因此这里收集**同一行、高度一致、横向连续**的全部字形，整体作为词标。
     """
-    cands = [g for g in glyphs if g["h"] >= 18]
+    fw = frame_width or _CALIB_WIDTH
+    h_min = _adaptive(18, fw, lo=11)
+    span_min = _adaptive(26, fw, lo=15)
+    cands = [g for g in glyphs if g["h"] >= h_min and g.get("strong", True)]
     if len(cands) < 2:
         return None
     cands.sort(key=lambda g: g["x"])
@@ -124,7 +164,7 @@ def _find_wordmark(glyphs: list[dict]) -> list[dict] | None:
             continue
         gx1 = min(g["x"] for g in group)
         gx2 = max(g["x"] + g["w"] for g in group)
-        if gx2 - gx1 < 26:
+        if gx2 - gx1 < span_min:
             continue
         hs = [g["h"] for g in group]
         # "即梦" 二字高度几乎一致（同一字号）；背景物体的高度比要乱得多。
@@ -153,12 +193,15 @@ def _find_wordmark(glyphs: list[dict]) -> list[dict] | None:
     return best[1] if best else None
 
 
-def _find_nickname(glyphs: list[dict], wordmark: list[dict]) -> list[dict]:
+def _find_nickname(glyphs: list[dict], wordmark: list[dict],
+                   frame_width: int | None = None) -> list[dict]:
     """The '@nickname' line directly below the wordmark.
 
     Width comes from the actual glyphs, so any nickname length works
     (@娥酱, @张三, @李思思思思, ...).
     """
+    fw = frame_width or _CALIB_WIDTH
+    nick_h_min = _adaptive(10, fw, lo=6)
     wx1 = min(g["x"] for g in wordmark)
     wx2 = max(g["x"] + g["w"] for g in wordmark)
     wy1 = min(g["y"] for g in wordmark)
@@ -171,7 +214,7 @@ def _find_nickname(glyphs: list[dict], wordmark: list[dict]) -> list[dict]:
         # 必须落在 wordmark 行下方、且不太远
         if g["y"] < wy1 + wh * 0.55 or g["y"] > wy2 + wh * 1.5:
             continue
-        if g["h"] < 10 or g["h"] > wh * 1.15:
+        if g["h"] < nick_h_min or g["h"] > wh * 1.15:
             continue
         # 水平上要与 wordmark 有重叠或紧邻（昵称常与 logo 左对齐或向右溢出）
         if g["x"] + g["w"] < wx1 - wh * 1.5 or g["x"] > wx2 + wh * 9.0:
@@ -179,14 +222,28 @@ def _find_nickname(glyphs: list[dict], wordmark: list[dict]) -> list[dict]:
         picked.append(g)
     if not picked:
         return []
-    # 只保留水平上连成一片的字形，避免把远处无关亮点算进来
+    # 只保留水平上连成一片的字形，避免把远处无关亮点算进来。
+    # 昵称里的简单字（十/三/之/语）白色核心小、可能整字不达强档字形门槛，
+    # 在链上留下 1~3 个字宽的空洞；擦除框是并集矩形——只要链延伸过去，
+    # 缺失字符的像素自然被盖住。因此允许**跨洞续链**，但必须满足：
+    #   1. 洞后的字形与链**同一文字行**（y 中心偏差 ≤ 0.35×字高）——
+    #      实测真实视频里 @娥酱 右侧 121px 处的背景碎石反光（不同行）
+    #      会被这条挡掉，不会误扩擦除框；
+    #   2. 空洞宽度 ≤ 4.5×字高（实测 12 字昵称最大缺口约 3.4×字高，
+    #      真实字间距 ≤0.5×字高）。
     picked.sort(key=lambda g: g["x"])
     chain = [picked[0]]
     for g in picked[1:]:
         ref = chain[-1]
         gap = g["x"] - (ref["x"] + ref["w"])
-        if gap > max(ref["h"], g["h"]) * 2.2:
+        if gap > max(ref["h"], g["h"]) * 4.5:
             break
+        if gap > max(ref["h"], g["h"]) * 2.2:
+            # 空洞续链：必须同行，否则视为无关亮点
+            ref_c = ref["y"] + ref["h"] / 2
+            g_c = g["y"] + g["h"] / 2
+            if abs(g_c - ref_c) > max(ref["h"], g["h"]) * 0.35:
+                break
         chain.append(g)
     return chain
 
@@ -203,18 +260,28 @@ def _union(objs: list[dict]) -> tuple[int, int, int, int]:
 def detect_in_window(
     median_bgr: np.ndarray,
     corner: str,
+    *,
+    frame_width: int | None = None,
 ) -> LogoHit | None:
     """Locate the logo (wordmark + nickname) inside one corner window.
 
     All returned coordinates are **window-relative**; the caller adds the window
     origin. Keeping this function pure (median image in, box out) makes it
     trivially testable on crops.
+
+    ``frame_width`` 是整帧宽度（非窗口宽度），用于缩放绝对像素阈值；
+    缺省时从窗口宽度按 ``WINDOW_W_FRAC`` 反推。
     """
-    glyphs = _glyphs(median_bgr)
-    wordmark = _find_wordmark(glyphs)
+    fw = frame_width or max(1, int(round(median_bgr.shape[1] / WINDOW_W_FRAC)))
+    # 亮背景守卫：窗口几乎全白时白色判据已失效，检出的任何"字形"都不可信
+    white_ratio = float((_white_mask(median_bgr) > 0).mean())
+    if white_ratio > _MAX_WHITE_RATIO:
+        return None
+    glyphs = _glyphs(median_bgr, fw)
+    wordmark = _find_wordmark(glyphs, fw)
     if not wordmark:
         return None
-    nickname = _find_nickname(glyphs, wordmark)
+    nickname = _find_nickname(glyphs, wordmark, fw)
     wm = _union(wordmark)
     full = _union(wordmark + nickname) if nickname else wm
     wh = wm[3]
@@ -313,7 +380,7 @@ def detect_timeline(
                 continue
             stack = np.stack([frames[i][wy:wy + wh, wx:wx + ww] for i in idx])
             med = np.median(stack, axis=0).astype(np.uint8)
-            hit = detect_in_window(med, corner)
+            hit = detect_in_window(med, corner, frame_width=w)
             if hit is None:
                 continue
             if best is None or hit.confidence > best.confidence:
@@ -399,9 +466,32 @@ def detect_timeline(
 
 
 def pill_region(width: int, height: int) -> tuple[int, int, int, int]:
-    """Absolute box of the always-on top-left 'AI生成' pill."""
-    x, y, w, h = PILL_REL
-    return (round(width * x), round(height * y), round(width * w), round(height * h))
+    """Absolute box of the always-on top-left 'AI生成' pill.
+
+    1280×720 横屏实测：药丸位于 (6, 8)，尺寸 80×40。非 16:9 分辨率上
+    「按帧高缩放」会把药丸高度拉到不符合实际的值（720×1280 竖屏下
+    0.0556×1280 = 71px，而药丸设计高度只有 40px），于是叠加三种缩放假设
+    取并集，保证竖屏上药丸一定被盖住：
+
+    1. 原始标定（x/w 随帧宽、y/h 随帧高）——16:9 下与按宽缩放完全一致；
+    2. 整体按帧宽等比缩放（叠加层随播放器宽度缩放的假设）；
+    3. 位置随帧宽、尺寸保持 720p 设计值（叠加层不随分辨率缩放的假设）。
+
+    16:9 分辨率上三者重合或互为子集，行为与旧版一致；非 16:9 上并集
+    才生效。并集带来的多擦区域都在左上角内，无观感损失。
+    """
+    rx, ry, rw, rh = PILL_REL
+    k = width / 1280.0
+    boxes = [
+        (round(width * rx), round(height * ry), round(width * rw), round(height * rh)),
+        (round(6 * k), round(8 * k), round(80 * k), round(40 * k)),
+        (6, 8, 80, 40),
+    ]
+    x1 = min(b[0] for b in boxes)
+    y1 = min(b[1] for b in boxes)
+    x2 = max(b[0] + b[2] for b in boxes)
+    y2 = max(b[1] + b[3] for b in boxes)
+    return (x1, y1, x2 - x1, y2 - y1)
 
 
 def regions_by_frame(
