@@ -96,7 +96,15 @@ def _glyphs(img: np.ndarray) -> list[dict]:
 
 
 def _find_wordmark(glyphs: list[dict]) -> list[dict] | None:
-    """Two similar-height glyphs sitting side by side on one line ("即梦")."""
+    """The "即梦" wordmark: all same-height glyphs on one text line.
+
+    注意：不能只取「前两块」。中文笔画常被白色掩码切成多个连通域——
+    实测左下角「即梦」被切成三块：``即`` 拆成两块（117 和 138），
+    ``梦`` 单独一块（160，宽 35）。只取前两块会把 ``梦`` 整个漏掉，
+    擦除框右边界就停在 156，而 ``梦`` 一直延伸到 196。
+
+    因此这里收集**同一行、高度一致、横向连续**的全部字形，整体作为词标。
+    """
     cands = [g for g in glyphs if g["h"] >= 18]
     if len(cands) < 2:
         return None
@@ -123,19 +131,25 @@ def _find_wordmark(glyphs: list[dict]) -> list[dict] | None:
         # 实测三个角的真实 wordmark 高度比为 1.00~1.08。
         if max(hs) / max(1, min(hs)) > 1.15:
             continue
-        # 只保留高度最接近的一对（"即梦"是两个字，"梦"字常被识别为更宽的块）
-        h_main = max(hs)
-        close = [g for g in group if h_main / g["h"] <= 1.15]
-        # 同高度的取最靠左的两个（"即"在"梦"左侧）
-        close.sort(key=lambda g: g["x"])
-        pair = close[:2] if len(close) >= 2 else close
-        if len(pair) < 2:
+        # 保留组内全部字形（可能 2 块，也可能因笔画断裂有 3~4 块）。
+        # 只过滤掉高度明显偏离主体的（如混进来的标点/噪点）。
+        h_med = float(np.median(hs))
+        kept = [g for g in group if abs(g["h"] - h_med) / h_med <= 0.20]
+        if len(kept) < 2:
+            continue
+        # 保留的字形必须彼此横向连续（防止把同行远处的东西并入）
+        kept.sort(key=lambda g: g["x"])
+        h_main = max(g["h"] for g in kept)
+        reach = h_main * 3.0          # "即梦" 两字跨度约 1.5~3 倍字高
+        anchor = kept[0]["x"]
+        kept = [g for g in kept if g["x"] - anchor <= reach]
+        if len(kept) < 2:
             continue
         # "即梦" 是画面上最大的文字：用字形高度做主排序依据，
         # 昵称行的小字（高度约一半）永远排不到前面。
-        score = h_main * 1000.0 + sum(g["area"] for g in pair) / 100.0
+        score = h_main * 1000.0 + sum(g["area"] for g in kept) / 100.0
         if best is None or score > best[0]:
-            best = (score, pair)
+            best = (score, kept)
     return best[1] if best else None
 
 
@@ -221,6 +235,13 @@ def detect_in_window(
     y1 = max(0, wm[1] - int(round(wh * 0.10)))
     x2 = full[0] + full[2]
     y2 = full[1] + full[3] + int(round(wh * 0.10))
+
+    # 右/下各留一点安全余量：字形最右一列的抗锯齿像素可能低于白色阈值，
+    # 导致检测框紧贴笔画边缘（实测左下角右侧只剩 2px，擦完仍有残影）。
+    # 半个字高以内都是纯背景，多擦这一点不会有观感损失。
+    pad = max(3, int(round(wh * 0.18)))
+    x2 += pad
+    y2 += pad
 
     bbox = (x1, y1, x2 - x1, y2 - y1)
     # 置信度：wordmark 字形数 + 昵称参与度 + 面积
