@@ -242,9 +242,14 @@ def erase_video_regions(
                 source_frame = frame
                 if per_frame:
                     # 解码帧数可能多于检测时段覆盖的帧数（如结尾黑场、两次解码
-                    # 帧数不一致）。越界的帧没有已定位的水印，直接原样写出。
-                    frame_regions = regions[frame_index] \
-                        if frame_index < len(regions) else []
+                    # 帧数不一致）。正常运行下 regions_by_frame 已用
+                    # extend_tail 把长度补齐到 frame_count，走不到这里；
+                    # 但为了防御索引错位，越界时沿用最后一个已知区域，
+                    # 而不是静默不擦（避免末尾几帧残留水印）。
+                    if frame_index < len(regions):
+                        frame_regions = regions[frame_index]
+                    else:
+                        frame_regions = regions[-1] if regions else []
                 else:
                     frame_regions = regions
                 combined_mask: np.ndarray | None = None

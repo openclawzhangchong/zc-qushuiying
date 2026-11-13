@@ -85,7 +85,14 @@ def _cuda_selftest() -> tuple[bool, str]:
 
     实现上用 MI-GAN 的真实 ONNX 模型跑一张极小图（32×32）。不额外引入
     ``onnx`` 依赖，且这个模型本来就要下载、必然可用。开销约几十毫秒。
+
+    注意：内部会先确保 CUDA DLL 搜索路径已注入。独立进程（如
+    ``check-gpu.bat``）直接调用本函数时，若没先走 ``install()``，
+    Windows 会找不到 ``cublasLt64_*.dll``，从而误判为不可用。
     """
+    # 独立进程调用时 DLL 路径可能还没注入，这里补上（幂等）
+    _prepare_cuda_dll_search_path()
+
     try:
         import numpy as np
         import onnxruntime as ort

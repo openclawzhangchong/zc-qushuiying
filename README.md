@@ -126,6 +126,28 @@ MI-GAN / LaMa 推理支持 NVIDIA GPU 加速，**默认优先 CUDA，任何环�
 | 推理中途 GPU 报错 | 禁用 CUDA 后整段用 CPU 重跑一次 |
 | 想强制 CPU | 设置环境变量 `WEBUI_ONNX_DEVICE=cpu` |
 
+#### GPU 环境自检 / 一键恢复
+
+改过 `onnxruntime-gpu` 版本（例如做故障注入测试）之后，用 `check-gpu.bat`
+确认版本是否正确、CUDA 是否真能执行：
+
+```bat
+check-gpu.bat          :: 只检查
+check-gpu.bat --fix    :: 版本不对就重装为锁定组合
+```
+
+输出示例：
+
+```
+[check] onnxruntime-gpu   = 1.19.2   (want 1.19.2)
+[check] nvidia-cudnn-cu12 = 9.10.2.21   (want 9.10.2.21)
+[selftest] True CUDA 自检通过
+[check] OK - versions pinned and CUDA self-test passed.
+```
+
+自检会真的跑一次 32×32 推理——只看 `provider` 是否存在不够，
+版本不匹配时 provider 能加载但一执行就崩。
+
 启动时会对 GPU 做一次**真实推理自检**（跑一张 32×32 的空图），
 只有真正能执行才算可用——仅仅「provider 存在」不算，因为版本不匹配时
 provider 能加载但一执行算子就崩。
