@@ -1,0 +1,372 @@
+# 交接文档（Handoff）
+
+给接手这个项目的人（或未来的自己）：**当前状态、怎么继续、已知坑**。
+
+最后更新：2026-11-13，对应版本 `v1.1.0`，提交 `00871da`。
+
+---
+
+## 1. 这个项目是什么
+
+把开源项目 [wiltodelta/remove-ai-watermarks](https://github.com/wiltodelta/remove-ai-watermarks)
+包装成「局域网内浏览器就能用」的中文 WebUI，并补上上游刻意不支持的
+**即梦 / Dreamina 视频水印**去除能力。
+
+**核心设计决策：上游代码不入库。**
+本仓库只含部署层（WebUI、脚本、文档），部署时用 `deploy.ps1` 克隆上游到本地。
+好处是上游更新可以直接 `git pull`；代价是部署步骤必须严格按脚本走。
+
+---
+
+## 2. 当前状态
+
+### 2.1 已完成
+
+| 功能 | 状态 | 验证方式 |
+| --- | --- | --- |
+| 中文 WebUI（上传/队列/预览/下载） | ✅ 可用 | 浏览器实测 |
+| 局域网访问 | ✅ 可用 | `192.168.168.200:8000` 返回 200 |
+| 8 类已注册水印（Sora/Veo/Seedance 等） | ✅ 可用 | 上游能力，未逐个实测 |
+| **即梦四角轮换水印** | ✅ 可用 | 笔画能量降幅 94%~96% |
+| **@昵称长度自适应** | ✅ 可用 | 合成图 2→12 字线性增长 |
+| 自动剪尾 5 秒 | ✅ 可用 | 12s→7.08s；3s 视频跳过 |
+| GPU 加速（V100） | ✅ 可用 | 671s → 38s（MI-GAN） |
+| GPU 失败自动回退 CPU | ✅ 可用 | 代码路径就绪，触发场景未实测 |
+| 预览不闪 / 可完整播放 | ✅ 已修 | `domReplaced: false`，可跳到结尾 |
+
+### 2.2 未验证 / 有风险
+
+| 项 | 风险 | 说明 |
+| --- | --- | --- |
+| **竖屏视频（9:16）** | 中 | 即梦预设按 1280×720 标定，竖屏未实测。自动定位理论上能工作，但需验证 |
+| **其他分辨率** | 中 | 非 720p 走等比缩放 + 自动定位；1080p/4K 未实测 |
+| **即梦改版** | 中 | 若 logo 版式大改（横排、无昵称、logo 位置变化），判据可能失效 |
+| **`PILL_REL` 药丸位置** | 低 | 写死常量，即梦若调整需重新标定 |
+| **GPU 回退路径** | 低 | 逻辑完整但没制造过真实推理中途失败来验证 |
+| **全新环境部署** | 中 | `deploy.ps1` 已修 webui 复制与端口问题，但**未在干净机器上完整跑过** |
+| 时间一致性（光流） | 低 | 功能可用但默认关闭（慢 28 倍），质量未做对照验证 |
+
+### 2.3 当前运行实例
+
+| 项 | 值 |
+| --- | --- |
+| 部署目录 | `D:\remove-ai-watermarks` |
+| 仓库工作副本 | `D:\zc-qushuiying` |
+| 端口 | 8000 |
+| 局域网地址 | `http://192.168.168.200:8000/` |
+| 监听 | `0.0.0.0:8000` |
+| 防火墙规则 | `Remove AI Watermarks WebUI`（TCP 8000） |
+| GPU | Tesla V100-PCIE-32GB，`CUDAExecutionProvider` 生效 |
+
+> 这些值随机器而变。以 `curl http://127.0.0.1:8000/api/info` 的实际返回为准。
+
+---
+
+## 3. 代码地图
+
+```
+zc-qushuiying/
+├── deploy.ps1                    # 一键部署（克隆上游、装 WebUI、装依赖、GPU、防火墙）
+├── start.bat                     # 启动（需从仓库根目录运行）
+├── README.md                     # 面向使用者的说明
+├── CHANGELOG.md                  # 版本变更记录
+├── docs/
+│   ├── screenshot.jpg
+│   ├── handoff.md                # ← 本文
+│   ├── jimeng-watermark-notes.md # 即梦算法完整技术记录（重要）
+│   └── gpu-and-ops-notes.md      # GPU 版本矩阵 + 运维速查
+└── webui/
+    ├── app.py                    # FastAPI：上传/队列/Range 预览/下载/自动识别
+    ├── erase_engine.py           # 区域擦除引擎（复用上游填充+编码管线）
+    ├── jimeng_detect.py          # 即梦自动定位（四角轮换 + 昵称自适应）
+    ├── gpu_accel.py              # GPU 优先 + 自动回退 CPU
+    └── static/index.html         # 中文单页界面（无 CDN 依赖）
+```
+
+### 3.1 各文件职责边界
+
+| 文件 | 负责 | 不负责 |
+| --- | --- | --- |
+| `app.py` | HTTP 接口、任务队列、文件生命周期、调用上游 CLI / 擦除引擎 | 不实现填充算法 |
+| `erase_engine.py` | 逐帧应用区域掩码、调用填充后端、编码输出 | 不决定「区域在哪」 |
+| `jimeng_detect.py` | 决定「每个时段擦哪里」 | 不执行擦除 |
+| `gpu_accel.py` | 推理设备选择与回退 | 不改业务逻辑 |
+
+**关键边界**：`jimeng_detect` 只产出
+`[(start_frame, end_frame, (x,y,w,h)), ...]`，`erase_engine` 消费它。
+两者可以独立测试、独立替换。
+
+---
+
+## 4. 数据流
+
+```
+浏览器上传
+   ↓ POST /api/upload（mode / backend / preset / trim_end / temporal）
+Job 入队（串行，一次一个）
+   ↓ worker_loop
+run_job(job)
+   ├─ mode == "erase"  → erase 分支
+   │    ├─ preset == "jimeng"
+   │    │    ├─ jimeng_detect.detect_timeline()   ← 逐帧定位
+   │    │    └─ regions_by_frame()                ← 展开成每帧区域
+   │    └─ erase_engine.erase_video_regions(regions=逐帧列表)
+   │         └─ 每帧：合并掩码 → fill() → 编码写入
+   │              失败 → gpu_accel.reset() + CPU 重跑
+   ├─ mode == "all"      → 上游 CLI `video all`
+   ├─ mode == "metadata" → 上游 CLI `video metadata`
+   └─ mode == "auto"     → detect_jimeng() 判断后走上面任一条
+   ↓
+可选剪尾（ffmpeg -c copy）
+   ↓
+输出 webui/data/outputs/<job_id>/clean.mp4
+   ↓ GET /media/<job_id>/<name>（Range）
+浏览器预览 / GET /download/<job_id>
+```
+
+---
+
+## 5. 怎么验证改动没坏
+
+### 5.1 最小冒烟测试
+
+```powershell
+# 1) 服务活着
+curl.exe -s http://127.0.0.1:8000/api/info
+
+# 2) 语法检查
+cd D:\remove-ai-watermarks
+.venv\Scripts\python.exe -m py_compile webui\app.py webui\erase_engine.py webui\jimeng_detect.py webui\gpu_accel.py
+
+# 3) 即梦定位单跑（不擦除，只看检测结果）
+.venv\Scripts\python.exe webui\jimeng_detect.py "C:\path\to\jimeng.mp4"
+```
+
+期望输出：每 4 秒一个时段，三个角各出现一次，结尾黑场列出三个角兜底。
+
+### 5.2 端到端（即梦）
+
+```powershell
+curl.exe -s -X POST http://127.0.0.1:8000/api/upload ^
+  -F "file=@C:\path\to\jimeng.mp4" ^
+  -F "mode=erase" -F "backend=cv2" -F "preset=jimeng" ^
+  -F "trim_end=0" -F "temporal=0"
+```
+
+然后轮询 `/api/job/<id>`，检查 `log` 里是否有：
+
+```
+[detect] 帧 0-95 区域 (1064, 551, 138, 75)
+[detect] 帧 96-191 区域 (55, 614, 101, 89)
+[detect] 帧 192-287 区域 (1081, 61, 132, 77)
+```
+
+### 5.3 效果验证（重要）
+
+不要靠肉眼看截图。用**笔画能量**对比，且必须有对照组：
+
+- 水印区域：能量应下降 90%+（实测 94%~96%）
+- 无水印的角：变化应在 ±3% 内（实测 ±2.7%）
+- 全片改动像素占比：应在 1% 量级（实测 1.01%）
+
+具体算法见 `docs/jimeng-watermark-notes.md` 第 8 节。
+
+---
+
+## 6. 发布流程
+
+### 6.1 本地提交
+
+```powershell
+cd D:\zc-qushuiying
+git add -A
+git commit -m "说明"
+```
+
+**中文提交信息不要用 PowerShell 内联传参**（会被 GBK 破坏）。
+用 Python 脚本调用 `subprocess` 并指定 `encoding="utf-8"`：
+
+```python
+import subprocess
+msg = "你的提交信息..."
+subprocess.run(["git", "commit", "-m", msg], cwd=r"D:\zc-qushuiying",
+               capture_output=True, encoding="utf-8")
+```
+
+### 6.2 推送
+
+先试直连：
+
+```powershell
+git push origin main
+```
+
+失败（`Empty reply from server` / `Failed to connect`）则走 API。
+API 推送脚本逻辑见 `docs/gpu-and-ops-notes.md` 第 8.3 节，步骤是：
+
+1. 读远端 `refs/heads/main` 拿当前 SHA
+2. 逐个文件 `POST /git/blobs`（**用 base64 编码**，避免行尾/编码问题）
+3. `POST /git/trees` 建树（`base_tree` = 远端当前树）
+4. `POST /git/commits`（`parents` = 远端 SHA）
+5. `PATCH /git/refs/heads/main` 移动分支
+
+**要点**：读取本地文件内容时必须用 `git cat-file blob`（保留原始字节），
+不要用 `git show`（会做行尾转换，导致远端内容与本地不一致）。
+
+### 6.3 推送后必查
+
+```powershell
+gh api repos/<owner>/zc-qushuiying/commits/main --jq ".sha[0:8] + \" \" + .commit.message[0:40]"
+```
+
+并抽查远端文件内容没有被编码破坏（中文可读、关键代码存在）。
+
+---
+
+## 7. 已知坑（务必先读）
+
+按「踩中概率」排序。
+
+### 7.1 中文文件禁用 PowerShell 批量替换
+
+`Get-Content` 按系统默认编码（GBK）解码 UTF-8 文件，会**整file 变成乱码**，
+且可能合并行。曾因此毁掉 `app.py`，从 git 恢复后重做。
+
+**一律用 Python：**
+
+```python
+from pathlib import Path
+p = Path("webui/app.py")
+s = p.read_text(encoding="utf-8")
+s = s.replace(old, new)
+p.write_text(s, encoding="utf-8")
+```
+
+### 7.2 `uv sync` 会覆盖上游源码
+
+不要直接改 `remove-ai-watermarks/src/**`。任何对上游行为的修改都应为
+**进程内猴子补丁**（参考 `gpu_accel.py` 替换 `_get_session`）。
+
+### 7.3 检测器只在真正 `run()` 时才报 GPU 错误
+
+`get_available_providers()` 里出现 `CUDAExecutionProvider` **不代表能用**。
+V100 上的 `cudaErrorNoKernelImageForDevice` 只在执行算子时抛出。
+验证必须真正跑一次推理。
+
+### 7.4 时间中位数是即梦方案的基础
+
+任何针对即梦的调试都应先看「时间中位数图」。单帧分析会被运动背景严重干扰，
+导致误判（我曾据此怀疑视频有旋转、怀疑箭头不存在）。
+
+### 7.5 窗口尺寸会影响长昵称
+
+`jimeng_detect.WINDOW_W_FRAC = 0.55`。改成更小的值会截断长昵称；
+改大则可能让背景物体进入搜索窗造成误报。改动此值必须重跑昵称长度测试。
+
+### 7.6 药丸要用「区域结构复杂度」验证
+
+「AI生成」药丸是半透明白底 + 深色字，**白色判据抓不到**。
+用区域内亮度标准差（原始 34 → 处理后 7~19）。
+
+### 7.7 `deploy.ps1` 必须带 UTF-8 BOM
+
+PowerShell **5.1**（Windows 10/Server 默认版本）在没有 BOM 时按系统 ANSI
+（中文环境即 GBK）解码脚本文件。脚本里的中文注释/字符串会把字节序列
+喂给解析器，某些组合被误判为引号或括号，于是报出**完全误导**的语法错误：
+
+```
+表达式或语句中包含意外的标记 '}'。
+表达式或语句中包含意外的标记 '"nvidia-cudnn-cu12==9.10.2.21"'。
+```
+
+代码本身没问题——是编码问题。修法是给 `.ps1` 加 BOM：
+
+```python
+from pathlib import Path
+p = Path("deploy.ps1")
+text = p.read_bytes().decode("utf-8").lstrip("\ufeff")
+p.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+```
+
+**验证方法**（改完必跑）：
+
+```powershell
+$err = $null
+[System.Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path deploy.ps1).Path, [ref]$null, [ref]$err) | Out-Null
+if ($err.Count) { $err | ForEach-Object { $_.Message } } else { "OK" }
+```
+
+### 7.8 `.bat` 必须 CRLF + 纯 ASCII
+
+两个独立问题，都会让批处理「看起来被合并成一行」：
+
+1. **行尾必须是 CRLF**。LF-only 的 `.bat` 在某些 cmd.exe 调用路径下
+   会把多行粘连，`rem` 注释可能吞掉后面的真实命令。
+2. **含中文必须谨慎**。cmd.exe 默认代码页是 936（GBK），
+   而文件是 UTF-8，中文会显示为乱码；更糟的是乱码字节可能破坏
+   `if (` / `)` 的配对判断。
+
+本项目 `start.bat` 因此**只用纯 ASCII**（注释也用英文）。
+如确需中文提示，应在文件开头加 `chcp 65001 >nul`，
+但仍建议关键控制流不依赖中文输出。
+
+### 7.9 `start.bat` 必须在仓库根目录运行
+
+它按 `%~dp0` 定位 `remove-ai-watermarks\webui\app.py`。
+上游自己的 `webui/start.bat` 是另一个脚本（用 `..\.venv`），两者不要混淆。
+
+---
+
+## 8. 下一步建议（按优先级）
+
+### P0：验证当前改动的稳健性
+
+1. **用竖屏即梦视频测一次**（9:16）。这是最可能出问题的场景。
+2. **用 1080p 横向即梦视频测一次**，确认等比缩放 + 自动定位正常。
+3. **在干净机器上完整跑一遍 `deploy.ps1`**（虚拟机或另一台 Windows），
+   确认「克隆 → 安装 → GPU → 防火墙 → `start.bat`」全链路可用。
+
+### P1：补齐能力
+
+4. **手动画框界面**：界面里允许用户拖框指定擦除区域。
+   适用于即梦改版、其他未注册厂商、或用户想擦别的东西。
+   后端 `erase_engine` 已支持任意区域列表，只差前端与一个 API。
+5. **多视频批量上传**：当前是单文件上传 + 串行队列，批量会明显提升效率。
+
+### P2：工程质量
+
+6. **给 `jimeng_detect` 加单元测试**：用合成图（本文档第 5.4 节的思路）
+   覆盖「昵称 2/5/8/12 字」「四角各位置」「无 logo 时不误报」。
+7. **GPU 回退路径做一次真实故障注入**：强制 CUDA 报错，确认 CPU 重跑生效。
+8. **加 `/api/health`**：区分「服务活着」和「模型可加载」。
+
+---
+
+## 9. 关键数字速查
+
+| 项 | 值 |
+| --- | --- |
+| 即梦 logo 换角周期 | **4 秒** |
+| 药丸位置（相对） | `(0.0047, 0.0111, 0.0625, 0.0556)` |
+| 箭头左扩系数 | 字高 × **1.9** |
+| wordmark 高度比阈值 | **≤ 1.15** |
+| 搜索窗 | 55% 宽 × 34% 高 |
+| 分块大小 | 1 秒（24 帧 @24fps） |
+| 短空档合并阈值 | ≤ 1.2 秒 |
+| MI-GAN 单帧（GPU） | 39 ms |
+| 光流 stabilize 单帧（CPU） | 1108 ms |
+| 即梦 16s 视频（cv2 GPU） | 25.6 秒 |
+| 笔画能量降幅 | 94%~96% |
+| **V100 GPU 组合** | `onnxruntime-gpu==1.19.2` + `nvidia-cudnn-cu12==9.10.2.21` |
+
+---
+
+## 10. 参考
+
+- 上游项目：https://github.com/wiltodelta/remove-ai-watermarks
+- 上游 PARKED 说明：`remove-ai-watermarks/docs/module-internals.md`（搜 jimeng）
+- 上游水印注册表：`remove-ai-watermarks/src/remove_ai_watermarks/video.py`
+- 本项目仓库：https://github.com/openclawzhangchong/zc-qushuiying
+- 算法细节：`docs/jimeng-watermark-notes.md`
+- GPU 与运维：`docs/gpu-and-ops-notes.md`

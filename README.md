@@ -15,7 +15,16 @@
 - 任务列表实时显示进度与日志；完成后页面内直接预览（支持拖动进度条）并一键下载
 - 可选：自动剪掉视频最后 5 秒（流复制截断，不重编码，几乎瞬时完成；视频过短时自动跳过）
 - 单任务串行队列；上传与输出文件保留 24 小时后自动清理，也可手动删除
-- 全程 CPU 运行，无需 GPU、无需系统 ffmpeg（依赖自带便携版 ffmpeg）
+- **GPU 优先、失败自动回退 CPU**（NVIDIA 显卡可用则用 CUDA，否则静默用 CPU）；无需系统 ffmpeg（依赖自带便携版 ffmpeg）
+
+## 文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更记录（含每项改动的实测数据） |
+| [docs/jimeng-watermark-notes.md](docs/jimeng-watermark-notes.md) | **即梦水印去除的完整技术记录**：为什么水印会移动、失败的 5 种尝试、最终算法、验证方法 |
+| [docs/gpu-and-ops-notes.md](docs/gpu-and-ops-notes.md) | GPU 版本矩阵（V100 踩坑全记录）、Windows DLL 排查、国内网络、运维速查 |
+| [docs/handoff.md](docs/handoff.md) | 交接文档：代码地图、数据流、发布流程、已知坑、下一步 |
 
 ## 快速开始
 
@@ -27,7 +36,15 @@ cd zc-qushuiying
 powershell -ExecutionPolicy Bypass -File deploy.ps1
 ```
 
-`deploy.ps1` 会自动完成：克隆上游仓库 → 把 `webui/` 装进去 → `uv sync` 安装依赖（含便携 ffmpeg）→ 放行防火墙端口 → 打印访问地址。
+`deploy.ps1` 会自动完成：克隆上游仓库 → 安装 `webui/`（只复制本项目文件，
+不覆盖上游自带脚本）→ `uv sync` 安装依赖（含便携 ffmpeg）→ 检测 NVIDIA 显卡并装 GPU 依赖
+→ 放行防火墙端口 → 打印访问地址。
+
+| 参数 | 说明 |
+| --- | --- |
+| `-Port 8080` | 指定端口（默认 8000） |
+| `-NoFirewall` | 不改防火墙 |
+| `-NoGpu` | 跳过 GPU 依赖安装（纯 CPU 部署） |
 
 ### 启动
 
@@ -35,8 +52,18 @@ powershell -ExecutionPolicy Bypass -File deploy.ps1
 start.bat
 ```
 
+`start.bat` 需要**从仓库根目录**运行（它按脚本所在目录定位
+`remove-ai-watermarks\webui\app.py`）。
+
 - 本机访问：http://127.0.0.1:8000/
 - 局域网访问：http://<本机IP>:8000/（启动时控制台会打印实际 IP；防火墙规则名 `Remove AI Watermarks WebUI`）
+
+想换端口，先设环境变量再启动（`deploy.ps1 -Port` 只影响防火墙规则和打印的地址）：
+
+```bat
+set PORT=8080
+start.bat
+```
 
 ### 手动部署
 
@@ -61,7 +88,7 @@ cd webui
 
 `webui/erase_engine.py` **不修改上游注册表**，而是复用上游同一条逐帧填充与原子编码管线（同样的 cv2 / MI-GAN / LaMa 后端、色彩档案、VFR 时间戳、HDR 拒绝、音频流复制、元数据剥离），接受手动或预设区域直接擦除。即梦预设区域按 1280x720 实测标定，并按帧尺寸等比缩放。
 
-### 后端性能与效果（1280x720，1280 视频实测）
+### 后端性能与效果（1280×720 实测）
 
 | 后端 | 速度（CPU） | 速度（V100 GPU） | 边界干净度 |
 | --- | --- | --- | --- |
@@ -156,6 +183,16 @@ onnxruntime-gpu 通过 pip 安装的 CUDA/cuDNN DLL 位于 `site-packages/nvidia
 检测结果会写进任务日志（`[detect] 帧 a-b 区域 (x,y,w,h)`），可自行核对。
 定位失败时自动退化为「固定四角全覆盖」——宁可多擦，也不漏水印。
 
+#### 可调常量（`webui/jimeng_detect.py`）
+
+| 常量 | 当前值 | 含义 |
+| --- | --- | --- |
+| `WINDOW_W_FRAC` / `WINDOW_H_FRAC` | `0.55` / `0.34` | 四角搜索窗占帧宽/帧高的比例；窗口过窄会截断长昵称 |
+| `PILL_REL` | `(0.0047, 0.0111, 0.0625, 0.0556)` | 左上「AI生成」药丸的相对位置（1280×720 实测）；即梦若改版需重标定 |
+| 左扩系数 | `wh * 1.9` | 从「即」字左边缘向左外扩多少个字高，用于覆盖彩色渐变箭头 |
+| wordmark 高度比 | `<= 1.15` | 「即梦」两字高度差上限；超过则判定不是 logo |
+| 分块时长 | 1 秒 | 求时间中位数图的窗口长度，也是换角判定的最小粒度 |
+
 实测（cv2 后端，393 帧，25.6 秒）：
 
 | 区域 | 原始笔画能量 | 处理后 | 降幅 |
@@ -171,8 +208,13 @@ onnxruntime-gpu 通过 pip 安装的 CUDA/cuDNN DLL 位于 `site-packages/nvidia
 
 ```
 zc-qushuiying/
-├── deploy.ps1        # 一键部署：克隆上游、装 WebUI、装依赖、放行防火墙
-├── start.bat         # 启动 WebUI（自动定位部署目录）
+├── deploy.ps1        # 一键部署：克隆上游、装 WebUI、装依赖、GPU、防火墙
+├── start.bat         # 启动 WebUI（从仓库根目录运行）
+├── CHANGELOG.md      # 版本变更记录
+├── docs/
+│   ├── handoff.md                # 交接文档（代码地图 / 发布流程 / 已知坑）
+│   ├── jimeng-watermark-notes.md # 即梦算法完整技术记录
+│   └── gpu-and-ops-notes.md      # GPU 版本矩阵 + 运维速查
 ├── webui/
 │   ├── app.py        # FastAPI 服务：上传 / 任务队列 / 预览(Range) / 下载 / 自动识别
 │   ├── erase_engine.py   # 区域擦除引擎（复用上游填充与编码管线）
@@ -199,6 +241,7 @@ WebUI（FastAPI）把上传的视频交给上游 CLI 的 `video all` / `video me
 | `webui/erase_engine.py` | 区域擦除引擎：绕过上游未注册的即梦水印，复用同一填充/编码管线 |
 | `webui/jimeng_detect.py` | 即梦水印自动定位：时间中位数找静态叠加、四角轮换跟踪、@昵称长度自适应 |
 | `deploy.ps1` / `start.bat` | Windows 一键部署与启动，含防火墙放行与克隆镜像回退 |
+| `docs/` | 完整技术记录：即梦算法推导、失败尝试、GPU 版本矩阵、运维速查、交接文档 |
 | 上游代码 | 不入库，部署时从官方仓库克隆，保持 `uv.lock` 锁定版本 |
 
 ## 合规与许可
@@ -207,3 +250,8 @@ WebUI（FastAPI）把上传的视频交给上游 CLI 的 `video all` / `video me
 - 本仓库的部署层代码同样以 Apache-2.0 提供
 - 仅用于处理你自己生成或拥有版权的内容；部分司法辖区（含中国）对移除 AI 标识有限制，使用前请自行确认合规
 - 上游文档：[supported signals](https://github.com/wiltodelta/remove-ai-watermarks/blob/main/docs/supported-signals.md) · [known limitations](https://github.com/wiltodelta/remove-ai-watermarks/blob/main/docs/known-limitations.md)
+
+## 版本
+
+本项目当前版本 **v1.1.0**，部署时锁定上游 `remove-ai-watermarks v0.60.0`。
+版本号与上游无关，变更明细见 [CHANGELOG.md](CHANGELOG.md)。

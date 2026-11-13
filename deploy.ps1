@@ -1,4 +1,4 @@
-# zc-qushuiying 一键部署脚本（Windows）
+﻿# zc-qushuiying 一键部署脚本（Windows）
 # 作用：克隆上游 remove-ai-watermarks -> 安装 WebUI -> uv sync 装依赖 -> 防火墙放行 -> 打印启动方式
 #
 # 用法：
@@ -52,8 +52,14 @@ else {
 }
 
 # 3. 安装 WebUI 到上游目录（app.py 按"webui 位于上游克隆目录内"定位 CLI）
+# 注意：只复制我们自己的文件，不整目录覆盖 —— 上游 webui/ 里自带的 start.bat
+# 等文件如果被整体覆盖删除，原版启动方式就没了。
 Info "安装 WebUI ..."
-Copy-Item -Recurse -Force (Join-Path $repoRoot "webui") (Join-Path $upstream "webui")
+$srcWebui = Join-Path $repoRoot "webui"
+$dstWebui = Join-Path $upstream "webui"
+New-Item -ItemType Directory -Force -Path $dstWebui | Out-Null
+Copy-Item -Force (Join-Path $srcWebui "*.py") $dstWebui
+Copy-Item -Recurse -Force (Join-Path $srcWebui "static") $dstWebui
 
 # 4. 安装依赖（uv.lock 锁定版本，含便携版 ffmpeg）
 Info "安装依赖（video + migan，首次较慢）..."
@@ -95,7 +101,11 @@ if (-not $NoFirewall) {
 
 Write-Host ""
 Info "部署完成！启动方式："
-Write-Host "  $upstream\webui\start.bat"
+Write-Host "  cd $repoRoot"
+Write-Host "  start.bat            （或直接双击 start.bat）"
 Write-Host ""
 Write-Host "  本机访问:   http://127.0.0.1:$Port/"
 Write-Host "  局域网访问: http://<本机IP>:$Port/  (启动时控制台会打印实际 IP)"
+Write-Host ""
+Write-Host "  如需换端口，请同时设置环境变量后再启动：" -ForegroundColor DarkGray
+Write-Host "    set PORT=$Port" -ForegroundColor DarkGray
