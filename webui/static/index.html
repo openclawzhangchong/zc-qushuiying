@@ -87,6 +87,12 @@ a.dl { color:var(--ok); font-size:13px; }
         </select>
       </div>
       <div class="field">
+        <label>结尾处理（可选）</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;padding:8px 10px;background:#10131a;border:1px solid var(--line);border-radius:8px;cursor:pointer;">
+          <input type="checkbox" id="trimEnd" style="accent-color:#6c8cff;"> 剪掉视频最后 5 秒
+        </label>
+      </div>
+      <div class="field">
         <label>&nbsp;</label>
         <button class="primary" id="btn" disabled>上传并处理</button>
       </div>
@@ -130,6 +136,7 @@ btn.onclick = async () => {
   fd.append('mode', $('#mode').value);
   fd.append('backend', $('#backend').value);
   fd.append('mark', $('#mark').value);
+  fd.append('trim_end', $('#trimEnd').checked ? '5' : '0');
   try {
     const r = await fetch('/api/upload', { method:'POST', body: fd });
     if (!r.ok) { const e = await r.json().catch(()=>({})); alert('上传失败: ' + (e.detail || r.status)); }
@@ -156,7 +163,7 @@ async function refresh() {
         <button class="btn-s" onclick="del('${j.id}')">删除</button>
         ${j.status==='running'||j.status==='queued' ? `<button class="btn-s" onclick="cancelJob('${j.id}')">取消</button>` : ''}</div>
     </div>
-    <div class="meta">${fmtDate(j.created)} · 模式: ${j.mode==='all'?'去水印+元数据':'仅元数据'} · 后端: ${j.backend} · 已用 ${fmtTime(j.elapsed)}</div>`;
+    <div class="meta">${fmtDate(j.created)} · 模式: ${j.mode==='all'?'去水印+元数据':'仅元数据'} · 后端: ${j.backend}${j.trim_end>0 ? ' · 剪尾 '+j.trim_end+' 秒' : ''} · 已用 ${fmtTime(j.elapsed)}</div>`;
     if (j.status === 'running') inner += `<div class="progress"><i></i></div>`;
     if (j.message) inner += `<div class="meta">${escapeHtml(j.message)}</div>`;
     if (j.status === 'done' && j.media_url) {

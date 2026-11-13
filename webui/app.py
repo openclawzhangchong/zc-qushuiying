@@ -51,6 +51,7 @@ class Job:
     mode: str               # "all" | "metadata"
     backend: str
     mark: str
+    trim_end: int = 0       # 剪掉结尾秒数，0 = 不剪
     status: str = "queued"  # queued | running | done | failed | cancelled
     message: str = ""
     created: float = field(default_factory=time.time)
@@ -70,6 +71,7 @@ class Job:
             "mode": self.mode,
             "backend": self.backend,
             "mark": self.mark,
+            "trim_end": self.trim_end,
             "status": self.status,
             "message": self.message,
             "created": self.created,
@@ -86,6 +88,48 @@ JOBS: dict[str, Job] = {}
 JOBS_LOCK = threading.Lock()
 WORKER_WAKE = threading.Event()
 WORKER_STOP = threading.Event()
+
+
+def _video_tool(name: str) -> str:
+    """解析上游包自带的 ffmpeg/ffprobe 路径（无需系统安装）。"""
+    try:
+        from remove_ai_watermarks.video_tools import require_video_tool
+        return require_video_tool(name)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"无法解析 {name} 路径（请确认已用上游 venv 运行）: {e}") from e
+
+
+def trim_video_end(path: Path, seconds: int, log: deque[str]) -> str:
+    """流复制剪掉视频结尾 seconds 秒，不重编码。返回给用户的提示语，失败返回空串。"""
+    try:
+        ffprobe = _video_tool("ffprobe")
+        ffmpeg = _video_tool("ffmpeg")
+        probe = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=60,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        duration = float(probe.stdout.strip())
+        new_dur = duration - seconds
+        if new_dur < 1.0:
+            return f"视频仅 {duration:.1f} 秒，剪掉 {seconds} 秒后不足 1 秒，已跳过剪尾"
+        tmp = path.with_name(path.stem + "_trim" + path.suffix)
+        proc = subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-i", str(path), "-map", "0",
+             "-t", f"{new_dur:.6f}", "-c", "copy", str(tmp)],
+            capture_output=True, text=True, timeout=300,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            os.replace(tmp, path)
+            log.append(f"  [webui] 已剪掉最后 {seconds} 秒: {duration:.2f}s -> {new_dur:.2f}s (流复制，不重编码)")
+            return f"已剪掉最后 {seconds} 秒 ({duration:.1f}s → {new_dur:.1f}s)"
+        log.append(f"  [webui] 剪尾失败: {(proc.stderr or '').strip()[:300]}")
+        tmp.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001
+        log.append(f"  [webui] 剪尾出错: {e}")
+    return ""
 
 
 def next_queued_job() -> Job | None:
@@ -149,15 +193,25 @@ def run_job(job: Job) -> None:
             if job.status == "cancelled":
                 pass
             elif code == 0 and out_path.exists():
-                job.status = "done"
                 job.output_path = out_path
                 job.output_name = f"clean_{Path(job.name).stem}{ext}"
+        if job.status == "running" and job.output_path and job.trim_end > 0:
+            trim_note = trim_video_end(out_path, job.trim_end, job.log)
+        else:
+            trim_note = ""
+        with JOBS_LOCK:
+            if job.status == "cancelled":
+                pass
+            elif code == 0 and out_path.exists():
+                job.status = "done"
                 if job.removed_mark:
                     job.message = f"已移除可见水印 ({job.removed_mark}) 并清理 AI 元数据"
                 elif "No stable" in "\n".join(job.log) or "no stable" in "\n".join(job.log):
                     job.message = "未检测到稳定的可见水印，已输出去 AI 元数据的直通版本"
                 else:
                     job.message = "处理完成"
+                if trim_note:
+                    job.message += f"；{trim_note}"
             else:
                 job.status = "failed"
                 job.message = "处理失败，详见日志"
@@ -232,6 +286,7 @@ async def upload(
     mode: str = Form("all"),
     backend: str = Form("cv2"),
     mark: str = Form("auto"),
+    trim_end: int = Form(0),
 ) -> JSONResponse:
     if mode not in {"all", "metadata"}:
         raise HTTPException(400, "mode 无效")
@@ -239,6 +294,8 @@ async def upload(
         raise HTTPException(400, "backend 无效")
     if mark not in MARKS:
         raise HTTPException(400, "mark 无效")
+    if trim_end < 0 or trim_end > 60:
+        raise HTTPException(400, "trim_end 需在 0-60 秒之间")
     orig = Path(file.filename or "video.mp4").name
     ext = Path(orig).suffix.lower()
     if ext not in VIDEO_EXTS:
@@ -253,7 +310,7 @@ async def upload(
     if size == 0:
         in_path.unlink(missing_ok=True)
         raise HTTPException(400, "空文件")
-    job = Job(id=job_id, name=orig, mode=mode, backend=backend, mark=mark, input_path=in_path)
+    job = Job(id=job_id, name=orig, mode=mode, backend=backend, mark=mark, trim_end=trim_end, input_path=in_path)
     with JOBS_LOCK:
         JOBS[job_id] = job
     WORKER_WAKE.set()
