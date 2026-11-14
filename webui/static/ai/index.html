@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>创作者中心 · 智策Ai</title>
+<style>
+:root { --bg:#0d1017; --card:#161b26; --line:#273043; --text:#e9edf5; --muted:#8b93a3; --acc:#7c6cff; --ok:#3ecf8e; --gold:#f5c04e; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font-family:"Microsoft YaHei",system-ui,sans-serif; }
+.wrap { max-width:1500px; margin:0 auto; padding:26px 18px 70px; }
+header.top { display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:6px; }
+h1 { font-size:22px; margin:0; letter-spacing:1px; }
+.brand { color:var(--gold); font-size:13px; letter-spacing:1px; }
+.sub { color:var(--muted); font-size:12.5px; margin-bottom:20px; }
+#videos { display:grid; grid-template-columns:repeat(5,1fr); gap:12px; }
+@media (max-width:1280px) { #videos { grid-template-columns:repeat(4,1fr); } }
+@media (max-width:1024px) { #videos { grid-template-columns:repeat(3,1fr); } }
+@media (max-width:720px)  { #videos { grid-template-columns:repeat(2,1fr); } }
+@media (max-width:480px)  { #videos { grid-template-columns:1fr; } }
+.vcard { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden;
+         transition:.15s; display:flex; flex-direction:column; cursor:pointer; }
+.vcard:hover { border-color:var(--acc); transform:translateY(-2px); }
+.thumb { aspect-ratio:9/16; background:#000; display:flex; align-items:center; justify-content:center; }
+.thumb video { width:100%; height:100%; object-fit:cover; display:block; }
+.vbody { padding:9px 10px 11px; display:flex; flex-direction:column; gap:5px; }
+.vname { font-size:12px; font-weight:600; word-break:break-all; overflow:hidden; display:-webkit-box;
+         -webkit-line-clamp:1; -webkit-box-orient:vertical; }
+.vmeta { color:var(--muted); font-size:11px; display:flex; justify-content:space-between; align-items:center; gap:6px; }
+.credits { color:var(--gold); font-weight:600; white-space:nowrap; }
+.meta-empty { color:var(--muted); font-size:13px; padding:30px 0; text-align:center; grid-column:1/-1; }
+footer.foot { margin-top:34px; text-align:center; color:var(--muted); font-size:12px; line-height:2; }
+footer.foot .brand-line { color:var(--gold); font-size:13.5px; letter-spacing:2px; }
+/* 模态框 */
+.overlay { position:fixed; inset:0; background:rgba(4,6,11,.85); display:none; align-items:center; justify-content:center; z-index:50; padding:18px; }
+.overlay.show { display:flex; }
+.modal { background:var(--card); border:1px solid var(--line); border-radius:14px; width:min(560px,96vw);
+         max-height:94vh; overflow:auto; padding:16px; position:relative; }
+.modal-x { position:absolute; top:10px; right:12px; background:#232b3d; border:1px solid var(--line);
+           color:var(--text); width:30px; height:30px; border-radius:8px; font-size:15px; cursor:pointer; }
+.modal-x:hover { border-color:var(--err); color:var(--err); }
+.video-full { width:100%; border-radius:10px; background:#000; max-height:70vh; }
+.mrow { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; }
+.mname { font-weight:600; font-size:14.5px; }
+.mmeta { color:var(--muted); font-size:12px; margin-top:6px; line-height:1.9; }
+.mmeta .mode { color:var(--text); }
+a.dl { color:var(--ok); font-size:13px; text-decoration:none; border:1px solid rgba(62,207,142,.4);
+       padding:7px 14px; border-radius:8px; }
+a.dl:hover { background:rgba(62,207,142,.12); }
+.creator { margin-top:12px; padding:9px 12px; border:1px dashed rgba(245,192,78,.45); border-radius:9px;
+           color:var(--gold); font-size:13px; letter-spacing:1px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>✨ 创作者中心</h1>
+    <div class="brand">智策Ai联合研发人张大树</div>
+  </header>
+  <div class="sub">AI 创作视频合集 · 点击卡片放大播放</div>
+  <div id="videos"><div class="meta-empty">加载中…</div></div>
+  <footer class="foot">
+    <div class="brand-line">智策Ai联合研发人张大树</div>
+    <div>本页内容均为 AI 创作 · 页面数据每 5 秒自动刷新</div>
+  </footer>
+</div>
+
+<div class="overlay" id="overlay" onclick="if(event.target===this) closeModal()">
+  <div class="modal" id="modalBody"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const LATEST = {};
+
+function fmtDate(ts) { return new Date(ts*1000).toLocaleString('zh-CN', {hour12:false}); }
+
+async function refresh() {
+  let vids = [];
+  try { vids = await (await fetch('/api/ai/videos')).json(); } catch (e) { return; }
+  const box = $('#videos');
+  if (!vids.length) { box.innerHTML = '<div class="meta-empty">暂无作品，快去创作吧</div>'; return; }
+
+  // 增量渲染：按 id 复用节点，缩略图稳定后不重建（避免闪烁）
+  const seen = new Set();
+  for (const v of vids) {
+    seen.add(v.id);
+    LATEST[v.id] = v;
+    let el = box.querySelector(`[data-v="${v.id}"]`);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'vcard';
+      el.dataset.v = v.id;
+      el.onclick = () => openModal(v.id);
+      el._sig = '';
+      box.appendChild(el);
+    }
+    const sig = [v.name, v.media_url, v.credits, v.created].join('|');
+    if (el._sig !== sig) { el._sig = sig; el.innerHTML = renderCard(v); }
+  }
+  for (const el of [...box.children]) {
+    if (el.dataset && el.dataset.v && !seen.has(el.dataset.v)) el.remove();
+  }
+}
+
+function renderCard(v) {
+  return `<div class="thumb"><video preload="metadata" muted playsinline src="${v.media_url}#t=0.5"></video></div>
+    <div class="vbody">
+      <div class="vname">${escapeHtml(v.name)}</div>
+      <div class="vmeta"><span>${fmtDate(v.created)}</span><span class="credits">⭐ ${v.credits} 积分</span></div>
+    </div>`;
+}
+
+function openModal(id) {
+  const v = LATEST[id];
+  if (!v) return;
+  $('#modalBody').innerHTML = `
+    <button class="modal-x" onclick="closeModal()" title="关闭">✕</button>
+    <video class="video-full" controls autoplay playsinline src="${v.media_url}"></video>
+    <div class="mrow">
+      <div class="mname">${escapeHtml(v.name)}</div>
+      <a class="dl" href="${v.download_url}">⬇ 下载</a>
+    </div>
+    <div class="mmeta">
+      <div>${fmtDate(v.created)} · <span class="mode">模式: 区域生成</span> · 消耗积分 <b style="color:var(--gold)">⭐ ${v.credits}</b></div>
+    </div>
+    <div class="creator">智策Ai联合研发人张大树</div>`;
+  $('#overlay').classList.add('show');
+}
+function closeModal() {
+  const v = $('#modalBody video');
+  if (v) v.pause();
+  $('#overlay').classList.remove('show');
+}
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

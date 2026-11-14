@@ -510,6 +510,46 @@ def index() -> HTMLResponse:
     return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
 
 
+# ---------------------------------------------------------------------------
+# 创作者中心（/ai/index.html）：面向展示的独立视图。
+# 只输出展示必需的字段（文件名/时间/播放地址/虚拟积分），**不包含任何
+# 去水印相关元数据**（模式细节/预设/后端/处理消息一律不出口）。
+# 该路径与全站一样受口令门禁保护。
+
+def _ai_credits(job_id: str) -> int:
+    """虚拟积分展示值：由任务 id 稳定映射到 66~200（同视频恒定）。"""
+    try:
+        h = int(job_id[:12], 16)
+    except ValueError:
+        h = abs(hash(job_id))
+    return 66 + h % 135
+
+
+@app.get("/api/ai/videos")
+def ai_videos() -> list[dict]:
+    with JOBS_LOCK:
+        done = [j for j in JOBS.values()
+                if j.status == "done" and j.output_path and j.output_path.exists()]
+        out = []
+        for j in sorted(done, key=lambda x: x.created, reverse=True):
+            out.append({
+                "id": j.id,
+                "name": j.output_name or j.name,
+                "media_url": f"/media/{j.id}/{j.output_name}",
+                "download_url": f"/download/{j.id}",
+                "created": j.created,
+                "credits": _ai_credits(j.id),
+            })
+    return out
+
+
+@app.get("/ai/index.html", response_class=HTMLResponse)
+@app.get("/ai/", response_class=HTMLResponse)
+@app.get("/ai", response_class=HTMLResponse)
+def ai_index() -> HTMLResponse:
+    return HTMLResponse((STATIC_DIR / "ai" / "index.html").read_text(encoding="utf-8"))
+
+
 @app.get("/api/info")
 def info() -> dict:
     gpu: dict = {}
