@@ -55,6 +55,11 @@
 | 仓库工作副本 | `D:\zc-qushuiying` |
 | 端口 | 8000 |
 | 局域网地址 | `http://192.168.168.200:8000/` |
+| 公网地址 | `https://shuiyin.jiuyeke.cn/`（**需口令**；局域网/本机免口令） |
+| 穿透链路 | Cloudflare(DNS only) → 服务器 Caddy(443) → frps:8081 → 本地 frpc → 8000 |
+| 开机自启 | 计划任务 `webui-shuiyin`（BootTrigger+SYSTEM，幂等） |
+| 桌面快捷方式 | `去水印WebUI.lnk`（双击=确保服务在跑+打开浏览器） |
+| 口令配置 | `webui/gate_passcode.txt` 或环境变量 `WEBUI_PASSCODE`（不入库） |
 | 监听 | `0.0.0.0:8000` |
 | 防火墙规则 | `Remove AI Watermarks WebUI`（TCP 8000） |
 | GPU | Tesla V100-PCIE-32GB，`CUDAExecutionProvider` 生效 |

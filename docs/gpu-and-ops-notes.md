@@ -471,3 +471,84 @@ Get-Process python | Select-Object Id, CPU, WorkingSet64
 
 > 部署目录、IP 都会因机器而异，以 `deploy.ps1` 实际输出的路径与启动时
 > 控制台打印的 IP 为准。
+
+---
+
+## 13. 公网域名穿透与口令门禁（v1.5.0，2026-11-14）
+
+去水印 WebUI 现已通过 frp + 服务器 Caddy 暴露到公网域名
+**https://shuiyin.jiuyeke.cn/**（远程需口令，局域网/本机免口令）。
+
+### 13.1 链路
+
+```
+访客 → Cloudflare DNS(shuiyin.jiuyeke.cn, DNS only)
+     → 服务器 Caddy(:443, Let's Encrypt 证书自动签发)
+     → reverse_proxy 127.0.0.1:8081
+     → frps(:8081, allowPorts 8080-8090)
+     → frp 隧道 → 本地 frpc → 127.0.0.1:8000（WebUI）
+```
+
+服务器侧改动（Ubuntu 24.04 / 47.119.167.86，root）：
+
+- DNS：Cloudflare API 加 A 记录 `shuiyin -> 47.119.167.86`
+  （zone `jiuyeke.cn`，**DNS only**，与 musicapi 等既有记录一致；
+  橙云代理会让 Caddy 的 ACME 变复杂，不必开）
+- Caddy：站点块追加到 **真正生效的配置**
+  `/opt/1panel/apps/caddy/caddy/data/conf/Caddyfile`
+  （1Panel 容器把该目录挂载为容器内 `/etc/caddy`——主机上的
+  `/etc/caddy/Caddyfile` 是一份游离旧副本，改它不生效！）
+  然后 `docker exec 1Panel-caddy-IqWe caddy reload --config /etc/caddy/Caddyfile`
+- allowPorts：frps 只允许 8080-8090，llama 占 8080，本服务用 8081
+
+本地侧（部署机）：
+
+- `D:\webui-startup\frpc-shuiyin.toml`（独立 frpc 实例，与
+  llamacpp 的 frpc 并存，命令行带 `frpc-shuiyin` 便于区分）
+- `D:\webui-startup\start-all.ps1` / `run-webui.cmd` / `run-frpc.cmd`：
+  幂等启动脚本（按端口/命令行判重）
+- 计划任务 `webui-shuiyin`：BootTrigger + SYSTEM，开机自动拉起
+- 桌面快捷方式 `去水印WebUI.lnk`：双击 = 确保服务在跑 + 打开浏览器
+
+### 13.2 口令门禁的实现要点
+
+- 门禁在 **WebUI 应用层**（FastAPI 中间件），不在 Caddy/frp 层：
+  这样门禁页可以做中文 UI、Cookie 30 天免重复输入、所有路由
+  （含视频预览/下载）统一受控
+- 「远程」判定：请求带 `X-Forwarded-For` / `X-Real-IP` /
+  `CF-Connecting-IP` 任一转发头（Caddy 必加 XFF），**或** Host 头
+  不是本机地址。后者是关键兜底——frps 的 8081 绑定公网 IP，
+  直连 `http://47.119.167.86:8081` 的请求没有转发头，但 Host 是
+  公网地址，同样要过口令（Host 伪造不了它自己的直连语义）
+- 局域网/本机直连：无转发头 + Host 为本机 IP/localhost → 直通
+- 口令存放：环境变量 `WEBUI_PASSCODE` 或 `webui/gate_passcode.txt`
+  （本地文件不入库）；Cookie 值为口令+固定盐的 SHA-256，不回传明文
+
+### 13.3 运维速查
+
+```powershell
+# 服务状态
+curl.exe -s http://127.0.0.1:8000/api/info
+# 隧道状态（本机 frpc 是否在跑）
+Get-CimInstance Win32_Process -Filter "name='frpc.exe'" | % CommandLine
+# 重启整套（按端口杀，勿按命令行——上游 start.bat 启动的实例是相对路径）
+Get-NetTCPConnection -LocalPort 8000 -State Listen | % OwningProcess   # 然后 Stop-Process
+Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','D:\webui-startup\start-all.ps1' -WindowStyle Hidden
+# 手动触发开机任务（等价于重启后自动执行）
+Start-ScheduledTask -TaskName 'webui-shuiyin'
+```
+
+### 13.4 踩坑记录
+
+- **改 Caddyfile 要改对文件**：主机 `/etc/caddy/Caddyfile` 是游离旧副本，
+  容器实际读的是 1Panel 挂载路径
+  `/opt/1panel/apps/caddy/caddy/data/conf/Caddyfile`（教训：先
+  `docker inspect <容器> --format '{{json .Mounts}}'` 确认挂载再动手）
+- **PowerShell 脚本含中文必须带 UTF-8 BOM**（本项目已知坑 7.7 的重演：
+  无 BOM 时 PS 5.1 按 GBK 解码，注册计划任务的脚本直接解析失败）
+- **Start-Process 的 `-WindowStyle` 与 `-RedirectStandard*` 参数集互斥**；
+  需要隐藏窗口 + 重定向输出时，用隐藏的 cmd 包一层重定向，
+  或把命令写进独立 .cmd 文件再拉起（本项目采用后者，还顺便绕开了
+  PowerShell 传参引号问题）
+- frpc 多实例并存没问题，但**判重要看命令行里的配置文件名**
+  （`frpc-shuiyin.toml`），按进程名判重会把 llamacpp 的 frpc 误判成自己

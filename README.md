@@ -9,6 +9,8 @@
 - 拖拽 / 点击上传视频，支持 mp4 / mov / m4v / webm / mkv / avi / flv
 - **自动识别来源**：检测到即梦 / Dreamina 导出时，自动切换到区域擦除 + MI-GAN
 - **区域擦除模式**：处理上游未注册的可见水印（即梦左上「AI生成」药丸 + **轮换的 logo/@昵称，自动定位**；横屏 16:9 与竖屏 9:16 均已实测，竖屏第二/三位在左中而非左下，片尾品牌动画自动保护）
+- **输出统一命名**：去水印完成自动改名 `zc-2026-11-14-001.mp4`（zc 前缀 + 当天日期 + 当天序号）
+- **处理记录三列网格**：按时间排序，点击卡片弹出模态框在线播放并下载
 - 自动检测并移除已注册的可见 AI 水印：Sora 2、Veo、Seedance、豆包、Dola、海螺 AI、Kling AI、Vidu 等
 - 清除 AI 元数据：C2PA、EXIF/XMP 生成参数、中国 TC260 `AIGC` 标签等（不重编码视频流）
 - 填充后端可选：cv2（快速、纯本地）/ MI-GAN / LaMa（质量更好，首次使用联网下载模型）
@@ -25,6 +27,14 @@
 | [docs/jimeng-watermark-notes.md](docs/jimeng-watermark-notes.md) | **即梦水印去除的完整技术记录**：为什么水印会移动、失败的 5 种尝试、最终算法、验证方法 |
 | [docs/gpu-and-ops-notes.md](docs/gpu-and-ops-notes.md) | GPU 版本矩阵（V100 踩坑全记录）、Windows DLL 排查、国内网络、运维速查 |
 | [docs/handoff.md](docs/handoff.md) | 交接文档：代码地图、数据流、发布流程、已知坑、下一步 |
+
+## 在线使用（已部署）
+
+**公网地址：<https://shuiyin.jiuyeke.cn/>**（远程访问需口令；局域网/本机直连免口令）
+
+- 链路：Cloudflare DNS → 服务器 Caddy(HTTPS) → frp 隧道 → 局域网主机上的 WebUI
+- 远程访客在口令页输入口令后 30 天内免重复输入（HttpOnly Cookie）
+- 局域网地址见页面底部（`http://<主机IP>:8000/`）
 
 ## 快速开始
 

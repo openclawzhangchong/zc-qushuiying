@@ -8,6 +8,107 @@
 
 ---
 
+## [1.5.0] - 2026-11-14
+
+输出统一命名 + 处理记录三列网格改版 + 文档与测试脚本入库。
+
+### 新增
+
+- **输出统一命名 `zc-日期-序号`**
+  去水印完成自动改名为 `zc-2026-11-14-001.mp4`（zc 固定前缀 + 当天
+  日期 + 当天第几个视频，三位序号）。序号按输出目录里当天已有文件
+  取最大值 +1，重启/清理后不重复；剪尾在改名之后进行（作用于新文件）。
+  适用于全部处理模式（区域擦除 / 去水印+元数据 / 仅元数据）。
+  实测：同日连续三个任务命名 001/002/003，剪尾输出 276 帧（393-5s×24，
+  关键帧取整）正确。
+
+- **处理记录三列网格 + 模态框**
+  任务列表从单列大卡片改为三列网格（<960px 两列、<640px 单列），
+  按创建时间倒序。完成的任务显示视频缩略图（取 0.5s 处画面），
+  点击卡片弹出模态框：大窗在线播放（自动播放、Esc/点击遮罩/✕ 关闭）、
+  一键下载、处理日志。增量渲染机制保留（缩略图节点在状态稳定后
+  永不重建，轮询不会引起画面闪烁）。
+
+- **tests/ 测试脚本入库**
+  `make_synthetic.py`（合成即梦素材生成）、`check_syn.py`（ground truth
+  比对）、`verify_erase.py`（端到端量化验收：能量/静态残留/对照/药丸/
+  PSNR，已参数化）、`analyze_chunks.py`（逐块检测体检），
+  附 `tests/README.md` 使用说明与验收标准。
+
+- **文档补齐**
+  README 贴出线上地址 https://shuiyin.jiuyeke.cn/ 与口令说明；
+  gpu-and-ops-notes 新增第 13 节（穿透链路、门禁实现要点、运维速查、
+  踩坑记录）；handoff 运行实例表更新。
+
+### 提醒
+
+- 远程访问口令、frp token、服务器凭据只存在于部署机本地文件，
+  未提交仓库；全新部署后需手动重建 `gate_passcode.txt` 才会启用门禁。
+
+---
+
+## [1.4.0] - 2026-11-14
+
+---
+
+## [1.4.0] - 2026-11-14
+
+公网域名访问 + 口令门禁 + 开机自启 + 桌面快捷方式。
+
+### 新增
+
+- **访问口令门禁**
+  经域名穿透的远程来访者需输入口令才能进入 WebUI；局域网与本机直连
+  不需要。判定「远程」的依据（满足任一即触发）：
+  1. 请求带反向代理注入的转发头（Caddy 必加 `X-Forwarded-For`，
+     走 Cloudflare 时另有 `CF-Connecting-IP`）；
+  2. Host 头不是本机地址——兜住「绕过 Caddy 直连 frp 公网端口」的
+     访客（这种请求没有转发头，但 Host 是公网域名/地址）。
+  口令来源：环境变量 `WEBUI_PASSCODE`，或 `webui/app.py` 同目录的
+  `gate_passcode.txt`（部署机本地文件，**不入库**）。两处都没有 =
+  不启用门禁，行为与旧版一致。口令正确后种 30 天 HttpOnly Cookie
+  （值为口令+固定盐的 SHA-256，不回传口令明文）。
+  门禁页 `/@gate`、提交 `/api/gate`，全部路由（含预览/下载）都在
+  门禁之后。
+
+- **公网域名穿透（frp + 服务器 Caddy）**
+  架构：访客 → Cloudflare（DNS only）→ 服务器 Caddy(443) →
+  frps:8081 → 本地 frpc → 本地 8000。
+  - 本地：`D:\webui-startup\frpc-shuiyin.toml`（tcp 代理，remotePort
+    8081，与 llamacpp 同一台 frp 服务器、同一 token）
+  - 服务器：Caddyfile 追加 `shuiyin.jiuyeke.cn { reverse_proxy
+    127.0.0.1:8081 }`（1Panel 挂载路径
+    `/opt/1panel/apps/caddy/caddy/data/conf/Caddyfile`）
+  - DNS：Cloudflare API 添加 A 记录 `shuiyin -> 47.119.167.86`
+    （DNS only，与 musicapi 等既有记录一致）；Let's Encrypt 证书由
+    Caddy 自动签发
+  - 口令判定依赖转发头/Host 头（见上），公网直连 8081 的访客因
+    Host 非本机地址同样要过口令
+
+- **开机自启**
+  计划任务 `webui-shuiyin`（BootTrigger + SYSTEM，照抄 frpc-llamacpp
+  模式）：启动 `D:\webui-startup\start-all.ps1`——幂等脚本，按端口
+  检查 WebUI、按命令行检查 frpc，已在跑就跳过。
+
+- **桌面快捷方式**
+  `去水印WebUI.lnk` → `start-all.ps1 -Open`：双击 = 确保服务在跑
+  （没跑就启动）+ 打开浏览器访问本机地址。
+
+### 运维备忘
+
+- 重启服务请**按端口找进程**（`Get-NetTCPConnection -LocalPort 8000`），
+  不要按命令行关键字——用上游 start.bat 启动的实例命令行是相对路径。
+- 部署脚本 `deploy.ps1` 只复制 `*.py` 和 `static/`，`gate_passcode.txt`
+  不会被覆盖；全新机器部署后需要手动重建该文件（或设
+  `WEBUI_PASSCODE`）才会启用门禁。
+- 口令、frp token、服务器凭据均只存在于部署机本地文件，未提交仓库。
+
+---
+
+## [1.3.0] - 2026-11-14
+
+---
+
 ## [1.3.0] - 2026-11-14
 
 真实竖屏即梦样本（`shuping.mp4`，720×1280 / 24fps / 394 帧）实测闭环。

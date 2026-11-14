@@ -8,7 +8,7 @@
 :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e8eaf0; --muted:#8b93a3; --acc:#6c8cff; --ok:#3ecf8e; --err:#ff6b6b; }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--text); font-family:"Microsoft YaHei",system-ui,sans-serif; }
-.wrap { max-width:900px; margin:0 auto; padding:24px 16px 80px; }
+.wrap { max-width:1200px; margin:0 auto; padding:24px 16px 80px; }
 h1 { font-size:22px; margin:0 0 4px; }
 .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
@@ -24,23 +24,38 @@ button.primary { background:var(--acc); border:none; color:#fff; padding:10px 18
 button.primary:disabled { opacity:.4; cursor:not-allowed; }
 .btn-s { background:#232838; border:1px solid var(--line); color:var(--text); padding:5px 10px; border-radius:6px; font-size:12px; cursor:pointer; }
 .btn-s:hover { border-color:var(--acc); }
-.job { border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:12px; }
-.job-head { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
-.job-name { font-weight:600; font-size:14px; word-break:break-all; }
-.badge { font-size:12px; padding:3px 10px; border-radius:20px; white-space:nowrap; }
+/* --- 任务列表：3 列网格，按时间倒序，点卡片开模态框 --- */
+#jobs { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+@media (max-width:960px) { #jobs { grid-template-columns:repeat(2,1fr); } }
+@media (max-width:640px) { #jobs { grid-template-columns:1fr; } }
+.job { border:1px solid var(--line); border-radius:10px; padding:10px; background:#131722; display:flex; flex-direction:column; gap:8px; min-width:0; }
+.job.done .thumb video { cursor:pointer; }
+.job.done:hover { border-color:var(--acc); }
+.thumb { border-radius:8px; overflow:hidden; background:#000; aspect-ratio:16/9; display:flex; align-items:center; justify-content:center; }
+.thumb video { width:100%; height:100%; object-fit:contain; background:#000; display:block; }
+.thumb .ph { color:var(--muted); font-size:12px; }
+.job-head { display:flex; justify-content:space-between; align-items:center; gap:6px; }
+.job-name { font-weight:600; font-size:12.5px; word-break:break-all; overflow:hidden; display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; }
+.badge { font-size:11px; padding:2px 8px; border-radius:20px; white-space:nowrap; }
 .queued { background:#2b3040; color:var(--muted); }
 .running { background:rgba(108,140,255,.15); color:var(--acc); }
 .done { background:rgba(62,207,142,.15); color:var(--ok); }
 .failed,.cancelled { background:rgba(255,107,107,.15); color:var(--err); }
-.meta { color:var(--muted); font-size:12px; margin-top:6px; }
-video { width:100%; border-radius:8px; margin-top:10px; background:#000; max-height:480px; }
+.meta { color:var(--muted); font-size:11.5px; margin-top:2px; }
+.video-full { width:100%; border-radius:8px; background:#000; max-height:64vh; }
 details.log { margin-top:8px; }
 details.log summary { color:var(--muted); font-size:12px; cursor:pointer; }
 pre.logbody { background:#0c0e13; border:1px solid var(--line); border-radius:8px; padding:10px; font-size:11px; color:#9aa3b5; overflow:auto; max-height:220px; white-space:pre-wrap; }
 a.dl { color:var(--ok); font-size:13px; }
-.progress { height:6px; background:#232838; border-radius:4px; overflow:hidden; margin-top:10px; }
+.progress { height:6px; background:#232838; border-radius:4px; overflow:hidden; margin-top:6px; }
 .progress i { display:block; height:100%; width:35%; background:var(--acc); border-radius:4px; animation:slide 1.2s ease-in-out infinite; }
 @keyframes slide { 0%{margin-left:-35%} 100%{margin-left:100%} }
+/* --- 模态框 --- */
+.overlay { position:fixed; inset:0; background:rgba(5,8,14,.82); display:none; align-items:center; justify-content:center; z-index:50; padding:20px; }
+.overlay.show { display:flex; }
+.modal { background:var(--card); border:1px solid var(--line); border-radius:14px; width:min(880px,96vw); max-height:92vh; overflow:auto; padding:18px; position:relative; }
+.modal-x { position:absolute; top:10px; right:12px; background:#232838; border:1px solid var(--line); color:var(--text); width:32px; height:32px; border-radius:8px; font-size:16px; cursor:pointer; }
+.modal-x:hover { border-color:var(--err); color:var(--err); }
 .foot { color:var(--muted); font-size:12px; text-align:center; margin-top:28px; line-height:1.8; }
 .foot code { background:#232838; padding:1px 6px; border-radius:4px; }
 </style>
@@ -114,8 +129,13 @@ a.dl { color:var(--ok); font-size:13px; }
   </div>
 
   <div class="card">
-    <div style="font-size:14px;font-weight:600;margin-bottom:10px;">任务列表</div>
+    <div style="font-size:14px;font-weight:600;margin-bottom:2px;">处理记录</div>
+    <div class="meta" style="margin-bottom:12px;">按时间排序（新的在前）· 点击卡片放大播放并下载 · 输出统一命名 <code>zc-日期-序号.mp4</code></div>
     <div id="jobs"></div>
+  </div>
+
+  <div class="overlay" id="overlay" onclick="if(event.target===this) closeModal()">
+    <div class="modal" id="modalBody"></div>
   </div>
 
   <div class="foot">
@@ -184,18 +204,22 @@ function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt
 function fmtTime(sec) { if (sec<60) return sec.toFixed(0)+' 秒'; return Math.floor(sec/60)+' 分 '+Math.round(sec%60)+' 秒'; }
 function fmtDate(ts) { return new Date(ts*1000).toLocaleString('zh-CN', {hour12:false}); }
 
+const LATEST = {};   // id -> 最新任务数据（模态框取用）
+
 async function refresh() {
   let jobs = [];
   try { jobs = await (await fetch('/api/jobs')).json(); } catch (e) { return; }
+  jobs.sort((a, b) => b.created - a.created);   // 按创建时间倒序（新的在前）
   const box = $('#jobs');
-  if (!jobs.length) { box.innerHTML = '<div class="meta">暂无任务</div>'; return; }
+  if (!jobs.length) { box.innerHTML = '<div class="meta">暂无任务，先上传一个视频吧</div>'; return; }
 
   // 增量渲染：以 job id 为键复用已有节点。
   // 早期版本每 2 秒整块重建 DOM，会让 <video> 被销毁重建，表现为画面狂闪、
-  // 播放进度归零。这里只改发生变化的文本，视频节点在状态稳定后永不重建。
+  // 播放进度归零。这里只改发生变化的文本，缩略图节点在状态稳定后永不重建。
   const seen = new Set();
   for (const j of jobs) {
     seen.add(j.id);
+    LATEST[j.id] = j;
     let el = box.querySelector(`[data-job="${j.id}"]`);
     if (!el) {
       el = document.createElement('div');
@@ -204,9 +228,9 @@ async function refresh() {
       el._sig = '';
       box.appendChild(el);
     }
-    // 签名包含所有会影响视频节点的字段；只有它变化时才重建整块
-    const sig = [j.status, j.media_url, j.message, j.output_name, j.backend,
-                 j.mode, j.preset, j.trim_end, j.temporal].join('|');
+    el.classList.toggle('done', j.status === 'done');
+    // 签名包含所有会影响缩略图节点的字段；只有它变化时才重建整块
+    const sig = [j.status, j.media_url, j.output_name, j.name, j.created].join('|');
     if (el._sig !== sig) {
       el._sig = sig;
       el.innerHTML = renderJob(j);
@@ -222,26 +246,73 @@ async function refresh() {
   }
 }
 
+function displayName(j) {
+  // 完成后展示统一命名的输出文件（zc-日期-序号），未完成展示原始文件名
+  return (j.status === 'done' && j.output_name) ? j.output_name : j.name;
+}
+
 function renderJob(j) {
   const badge = { queued:'排队中', running:'处理中', done:'完成', failed:'失败', cancelled:'已取消' }[j.status];
-  let inner = `<div class="job-head">
-      <div class="job-name">${escapeHtml(j.name)}</div>
-      <div><span class="badge ${j.status}">${badge}</span>
-        <button class="btn-s" onclick="del('${j.id}')">删除</button>
-        ${j.status==='running'||j.status==='queued' ? `<button class="btn-s" onclick="cancelJob('${j.id}')">取消</button>` : ''}</div>
-    </div>
-    <div class="meta">${fmtDate(j.created)} · 模式: ${{auto:'自动识别',all:'去水印+元数据',erase:'区域擦除',metadata:'仅元数据'}[j.mode] || j.mode}${j.preset?' · 预设 '+j.preset:''} · 后端: ${j.backend}${j.trim_end>0 ? ' · 剪尾 '+j.trim_end+' 秒' : ''} · 已用 <span data-elapsed>${fmtTime(j.elapsed)}</span></div>`;
-  if (j.status === 'running') inner += `<div class="progress"><i></i></div>`;
-  if (j.message) inner += `<div class="meta">${escapeHtml(j.message)}</div>`;
+  let inner = '';
   if (j.status === 'done' && j.media_url) {
-    inner += `<video controls preload="metadata" playsinline src="${j.media_url}"></video>
-      <div style="margin-top:8px;"><a class="dl" href="${j.download_url}">⬇ 下载去水印视频 (${j.output_name || ''})</a></div>`;
+    // 缩略图（#t=0.5 让浏览器取 0.5s 处的画面当封面），点击进模态框
+    inner += `<div class="thumb" onclick="openModal('${j.id}')" title="点击放大播放">
+        <video preload="metadata" muted playsinline src="${j.media_url}#t=0.5"></video>
+      </div>`;
+  } else if (j.status === 'running' || j.status === 'queued') {
+    inner += `<div class="thumb"><div class="ph">⏳ ${badge}…</div></div>`;
+  } else {
+    inner += `<div class="thumb"><div class="ph">${badge}</div></div>`;
+  }
+  inner += `<div class="job-head">
+      <div class="job-name" ${j.status==='done'&&j.media_url ? `style="cursor:pointer" onclick="openModal('${j.id}')"` : ''}>${escapeHtml(displayName(j))}</div>
+      <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
+        <span class="badge ${j.status}">${badge}</span>
+        <button class="btn-s" onclick="del('${j.id}')" title="删除">✕</button>
+        ${j.status==='running'||j.status==='queued' ? `<button class="btn-s" onclick="cancelJob('${j.id}')" title="取消">⏹</button>` : ''}
+      </div>
+    </div>
+    <div class="meta">${fmtDate(j.created)} · 已用 <span data-elapsed>${fmtTime(j.elapsed)}</span></div>`;
+  if (j.status === 'running') inner += `<div class="progress"><i></i></div>`;
+  if (j.message && j.status !== 'done') inner += `<div class="meta">${escapeHtml(j.message)}</div>`;
+  return inner;
+}
+
+/* --- 模态框：在线播放 + 下载 + 处理日志 --- */
+function openModal(id) {
+  const j = LATEST[id];
+  if (!j) return;
+  const badge = { queued:'排队中', running:'处理中', done:'完成', failed:'失败', cancelled:'已取消' }[j.status];
+  let inner = `<div class="job-head" style="margin-bottom:10px;">
+      <div class="job-name" style="font-size:15px;">${escapeHtml(displayName(j))}</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="badge ${j.status}">${badge}</span>
+        <button class="modal-x" onclick="closeModal()" title="关闭">✕</button>
+      </div>
+    </div>
+    <div class="meta">${fmtDate(j.created)} · 模式: ${{auto:'自动识别',all:'去水印+元数据',erase:'区域擦除',metadata:'仅元数据'}[j.mode] || j.mode}${j.preset?' · 预设 '+j.preset:''} · 后端: ${j.backend}${j.trim_end>0 ? ' · 剪尾 '+j.trim_end+' 秒' : ''}</div>`;
+  if (j.status === 'done' && j.media_url) {
+    inner += `<video class="video-full" controls autoplay playsinline src="${j.media_url}"></video>
+      <div style="margin-top:12px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
+        <a class="dl" href="${j.download_url}">⬇ 下载 ${escapeHtml(displayName(j))}</a>
+        <span class="meta">${j.message ? escapeHtml(j.message) : ''}</span>
+      </div>`;
+  } else if (j.message) {
+    inner += `<div class="meta" style="margin-top:10px;">${escapeHtml(j.message)}</div>`;
   }
   if (j.log && j.log.length) {
     inner += `<details class="log"><summary>处理日志</summary><pre class="logbody">${escapeHtml(j.log.join('\n'))}</pre></details>`;
   }
-  return inner;
+  const m = $('#modalBody');
+  m.innerHTML = inner;
+  $('#overlay').classList.add('show');
 }
+function closeModal() {
+  const v = $('#modalBody video');
+  if (v) v.pause();
+  $('#overlay').classList.remove('show');
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
 async function cancelJob(id) { await fetch(`/api/job/${id}/cancel`, {method:'POST'}); refresh(); }
 async function del(id) { await fetch(`/api/job/${id}`, {method:'DELETE'}); refresh(); }

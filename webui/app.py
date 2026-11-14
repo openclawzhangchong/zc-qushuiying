@@ -7,6 +7,7 @@ Run (cwd = webui/):
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import shutil
@@ -23,7 +24,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -248,8 +249,12 @@ def run_job(job: Job) -> None:
             with JOBS_LOCK:
                 if job.status != "cancelled":
                     job.status = "done"
-                    job.output_path = out_path
-                    job.output_name = f"clean_{Path(job.name).stem}{ext}"
+                    # 统一命名 zc-日期-序号：先改名再做剪尾（剪尾作用于新文件）
+                    daily = daily_output_name(ext)
+                    final_path = out_dir / daily
+                    out_path.rename(final_path)
+                    job.output_path = final_path
+                    job.output_name = daily
                     label = ERASE_PRESETS.get(job.preset, job.preset)
                     job.message = f"已擦除 {label} 区域 {erased} 帧（后端 {job.backend}）并清理 AI 元数据"
         except Exception as e:  # noqa: BLE001
@@ -262,7 +267,7 @@ def run_job(job: Job) -> None:
             with JOBS_LOCK:
                 job.finished = time.time()
         if job.status == "done" and job.output_path and job.trim_end > 0:
-            note = trim_video_end(out_path, job.trim_end, job.log)
+            note = trim_video_end(job.output_path, job.trim_end, job.log)
             if note:
                 with JOBS_LOCK:
                     job.message += f"；{note}"
@@ -298,16 +303,20 @@ def run_job(job: Job) -> None:
             if job.status == "cancelled":
                 pass
             elif code == 0 and out_path.exists():
-                job.output_path = out_path
-                job.output_name = f"clean_{Path(job.name).stem}{ext}"
+                # 统一命名 zc-日期-序号（先改名再做剪尾）
+                daily = daily_output_name(ext)
+                final_path = out_dir / daily
+                out_path.rename(final_path)
+                job.output_path = final_path
+                job.output_name = daily
         if job.status == "running" and job.output_path and job.trim_end > 0:
-            trim_note = trim_video_end(out_path, job.trim_end, job.log)
+            trim_note = trim_video_end(job.output_path, job.trim_end, job.log)
         else:
             trim_note = ""
         with JOBS_LOCK:
             if job.status == "cancelled":
                 pass
-            elif code == 0 and out_path.exists():
+            elif code == 0 and job.output_path and job.output_path.exists():
                 job.status = "done"
                 if job.removed_mark:
                     job.message = f"已移除可见水印 ({job.removed_mark}) 并清理 AI 元数据"
@@ -327,6 +336,24 @@ def run_job(job: Job) -> None:
     finally:
         with JOBS_LOCK:
             job.finished = time.time()
+
+
+def daily_output_name(ext: str) -> str:
+    """去水印输出统一命名：zc-2026-11-14-001.mp4。
+
+    ``zc`` 固定前缀 + 当天日期 + 当天第几个视频（001 起）。序号取输出
+    目录里当天已有文件的最大值 +1：清理任务删除的是整个任务目录，
+    因此编号不会被已清理的文件重新占用；任务串行执行，无并发竞争。
+    """
+    date = time.strftime("%Y-%m-%d")
+    max_seq = 0
+    for p in OUTPUT_DIR.glob(f"*/zc-{date}-*"):
+        try:
+            seq = int(p.stem.rsplit("-", 1)[-1])
+        except ValueError:
+            continue
+        max_seq = max(max_seq, seq)
+    return f"zc-{date}-{max_seq + 1:03d}{ext}"
 
 
 def cleanup_loop() -> None:
@@ -380,6 +407,102 @@ def lan_ips() -> list[str]:
     except OSError:
         pass
     return sorted(ips)
+
+
+# ---------------------------------------------------------------------------
+# 访问口令门禁：经 frp/Caddy 穿透的远程来访者需输入口令，局域网与本机直连
+# 不需要。判定「远程」的依据（满足任一即视为远程）：
+#   1. 请求带反向代理注入的转发头（Caddy 对每个反代请求都会加
+#      X-Forwarded-For；走 Cloudflare 时还有 CF-Connecting-IP）；
+#   2. Host 头不是本机地址——兜住「绕过 Caddy 直连 frp 公网端口」的
+#      访客：这种请求没有转发头，但 Host 是公网域名或服务器地址。
+# 口令来源：环境变量 WEBUI_PASSCODE，或本文件同目录的 gate_passcode.txt
+# （部署机本地文件，不入库）。两处都没有 = 不启用门禁（行为与旧版一致）。
+_GATE_COOKIE = "shuiyin_gate"
+_GATE_SALT = "shuiyin-gate-v1"
+
+
+def _gate_passcode() -> str:
+    code = os.environ.get("WEBUI_PASSCODE", "").strip()
+    if code:
+        return code
+    try:
+        return (Path(__file__).resolve().parent / "gate_passcode.txt").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _gate_token() -> str:
+    return hashlib.sha256((_GATE_SALT + _gate_passcode()).encode()).hexdigest()
+
+
+def _is_local_request(request: Request) -> bool:
+    if (request.headers.get("x-forwarded-for")
+            or request.headers.get("x-real-ip")
+            or request.headers.get("cf-connecting-ip")):
+        return False
+    host = (request.headers.get("host") or "").split(":")[0].strip("[]").lower()
+    if host in ("", "127.0.0.1", "localhost", "::1"):
+        return True
+    return host in {ip.lower() for ip in lan_ips()}
+
+
+_GATE_PAGE = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>访问口令 · AI 视频水印去除</title>
+<style>
+  body {{ margin:0; min-height:100vh; display:flex; align-items:center;
+         justify-content:center; background:#0f1420; color:#e8ecf4;
+         font-family:"Microsoft YaHei",system-ui,sans-serif; }}
+  .card {{ background:#171e2e; border:1px solid #2a3450; border-radius:14px;
+          padding:36px 40px; width:min(360px,90vw); text-align:center; }}
+  h1 {{ font-size:18px; margin:0 0 8px; }}
+  p {{ font-size:13px; color:#9aa7bd; margin:0 0 20px; }}
+  input {{ width:100%; box-sizing:border-box; padding:11px 13px; font-size:16px;
+          border-radius:8px; border:1px solid #2a3450; background:#0f1420;
+          color:#e8ecf4; text-align:center; letter-spacing:2px; }}
+  button {{ width:100%; margin-top:14px; padding:11px; font-size:15px;
+           border:0; border-radius:8px; background:#3b82f6; color:#fff;
+           cursor:pointer; }}
+  button:hover {{ background:#2f6fe0; }}
+  .err {{ color:#f87171; font-size:13px; margin-top:12px; min-height:18px; }}
+</style></head><body><div class="card">
+<h1>🔒 需要访问口令</h1>
+<p>远程访问受口令保护，请输入口令继续</p>
+<form method="post" action="/api/gate">
+  <input name="passcode" type="password" inputmode="numeric" autocomplete="off"
+         placeholder="访问口令" autofocus>
+  <button type="submit">进入</button>
+  <div class="err">{error}</div>
+</form>
+</div></body></html>"""
+
+
+@app.middleware("http")
+async def gate_middleware(request: Request, call_next):
+    if _gate_passcode():
+        path = request.url.path
+        if path not in ("/@gate", "/api/gate") and not _is_local_request(request):
+            if request.cookies.get(_GATE_COOKIE) != _gate_token():
+                return RedirectResponse("/@gate", status_code=302)
+    return await call_next(request)
+
+
+@app.get("/@gate", response_class=HTMLResponse)
+def gate_page(error: str = "") -> HTMLResponse:
+    return HTMLResponse(_GATE_PAGE.format(error="口令不正确，请重试" if error else ""))
+
+
+@app.post("/api/gate")
+def gate_submit(passcode: str = Form("")) -> RedirectResponse:
+    if passcode.strip() and passcode.strip() == _gate_passcode():
+        resp = RedirectResponse("/", status_code=303)
+        resp.set_cookie(_GATE_COOKIE, _gate_token(), httponly=True,
+                        samesite="lax", max_age=30 * 24 * 3600)
+        return resp
+    return RedirectResponse("/@gate?e=1", status_code=303)
 
 
 @app.get("/", response_class=HTMLResponse)
