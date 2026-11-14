@@ -523,6 +523,16 @@ def detect_timeline(
         if sgm["corner"]:
             per_corner.setdefault(sgm["corner"], []).extend(sgm["boxes"])
     corner_boxes = {c: merge_max(bs) for c, bs in per_corner.items()}
+    # 星标/渐变箭头是彩色装饰，白色掩码抓不到（或白色核心太小不稳定），
+    # 检测框只能锚定在文字字形上——按框高 30% 向四周扩一圈，把装饰
+    # 元素盖住（真实样本实测：TR 星标左缘超出文字框 13px、顶部 2px）。
+    expanded: dict[str, tuple[int, int, int, int]] = {}
+    for c, (bx, by, bw, bh) in corner_boxes.items():
+        m = max(6, int(round(bh * 0.3)))
+        nx1, ny1 = max(0, bx - m), max(0, by - m)
+        nx2, ny2 = min(w, bx + bw + m), min(h, by + bh + m)
+        expanded[c] = (nx1, ny1, nx2 - nx1, ny2 - ny1)
+    corner_boxes = expanded
     out: list[tuple[int, int, tuple[int, int, int, int]]] = []
     for si, seg in enumerate(segments):
         if seg["corner"] is not None:
