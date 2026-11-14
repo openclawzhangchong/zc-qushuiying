@@ -78,6 +78,8 @@ class Job:
     input_path: Path | None = None
     output_path: Path | None = None
     output_name: str | None = None
+    output_nomusic_path: Path | None = None   # 无背景音乐版本
+    output_nomusic_name: str | None = None
     removed_mark: str | None = None
     log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LINES))
     proc: subprocess.Popen | None = None
@@ -100,6 +102,11 @@ class Job:
             "output_name": self.output_name,
             "media_url": f"/media/{self.id}/{self.output_name}" if self.output_path else None,
             "download_url": f"/download/{self.id}" if self.output_path else None,
+            "output_nomusic_name": self.output_nomusic_name,
+            "media_url_nomusic": (f"/media/{self.id}/{self.output_nomusic_name}"
+                                   if self.output_nomusic_path else None),
+            "download_url_nomusic": (f"/download/{self.id}/nomusic"
+                                     if self.output_nomusic_path else None),
             "log": list(self.log)[-14:],
         }
 
@@ -271,6 +278,11 @@ def run_job(job: Job) -> None:
             if note:
                 with JOBS_LOCK:
                     job.message += f"；{note}"
+        if job.status == "done" and job.output_path:
+            nomusic = make_no_music(job.output_path, job.log)
+            if nomusic:
+                job.output_nomusic_path = nomusic
+                job.output_nomusic_name = nomusic.name
         return
 
     if job.mode == "metadata":
@@ -313,6 +325,11 @@ def run_job(job: Job) -> None:
             trim_note = trim_video_end(job.output_path, job.trim_end, job.log)
         else:
             trim_note = ""
+        if job.status == "running" and job.output_path:
+            nomusic = make_no_music(job.output_path, job.log)
+            if nomusic:
+                job.output_nomusic_path = nomusic
+                job.output_nomusic_name = nomusic.name
         with JOBS_LOCK:
             if job.status == "cancelled":
                 pass
@@ -354,6 +371,35 @@ def daily_output_name(ext: str) -> str:
             continue
         max_seq = max(max_seq, seq)
     return f"zc-{date}-{max_seq + 1:03d}{ext}"
+
+
+def make_no_music(path: Path, log: deque[str] | None = None) -> Path | None:
+    """生成无背景音乐版本：视频轨流复制（-c:v copy，秒级）、去掉音频轨。
+
+    文件名加 ``-无背景音乐`` 后缀，后缀本身就是标记，避免与原声版混淆。
+    生成失败只记日志、不影响主流程（主文件照常交付）。
+    """
+    try:
+        ffmpeg = _video_tool("ffmpeg")
+        out = path.with_name(path.stem + "-无背景音乐" + path.suffix)
+        if out.exists():
+            return out
+        proc = subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-i", str(path), "-an",
+             "-c:v", "copy", str(out)],
+            capture_output=True, text=True, timeout=600,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if proc.returncode == 0 and out.exists() and out.stat().st_size > 0:
+            if log is not None:
+                log.append(f"  [webui] 已生成无背景音乐版本: {out.name}")
+            return out
+        if log is not None:
+            log.append(f"  [webui] 无背景音乐版本生成失败: {(proc.stderr or '').strip()[:200]}")
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log.append(f"  [webui] 无背景音乐版本生成失败: {e}")
+    return None
 
 
 def cleanup_loop() -> None:
@@ -532,14 +578,19 @@ def ai_videos() -> list[dict]:
                 if j.status == "done" and j.output_path and j.output_path.exists()]
         out = []
         for j in sorted(done, key=lambda x: x.created, reverse=True):
-            out.append({
+            item = {
                 "id": j.id,
                 "name": j.output_name or j.name,
                 "media_url": f"/media/{j.id}/{j.output_name}",
                 "download_url": f"/download/{j.id}",
                 "created": j.created,
                 "credits": _ai_credits(j.id),
-            })
+            }
+            if j.output_nomusic_path and j.output_nomusic_path.exists():
+                item["name_nomusic"] = j.output_nomusic_name
+                item["media_url_nomusic"] = f"/media/{j.id}/{j.output_nomusic_name}"
+                item["download_url_nomusic"] = f"/download/{j.id}/nomusic"
+            out.append(item)
     return out
 
 
@@ -755,6 +806,13 @@ def media(job_id: str, name: str, request: Request) -> StreamingResponse:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if not job or not job.output_path or not job.output_path.exists() or name != job.output_name:
+        # 无背景音乐版本走同一接口：名字与已知变体严格相等才放行（防目录穿越）
+        if (job and job.output_nomusic_path and job.output_nomusic_path.exists()
+                and name == job.output_nomusic_name):
+            return _range_response(
+                request, job.output_nomusic_path,
+                MEDIA_TYPES.get(job.output_nomusic_path.suffix.lower(), "video/mp4"),
+            )
         raise HTTPException(404, "not found")
     return _range_response(
         request, job.output_path,
@@ -772,6 +830,23 @@ def download(job_id: str, request: Request) -> StreamingResponse:
     return _range_response(
         request, job.output_path,
         MEDIA_TYPES.get(job.output_path.suffix.lower(), "video/mp4"), filename=safe,
+    )
+
+
+@app.get("/download/{job_id}/nomusic")
+def download_nomusic(job_id: str, request: Request) -> StreamingResponse:
+    """无背景音乐版本下载（文件名带 -无背景音乐 后缀，天然区分）。"""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if (not job or not job.output_nomusic_path
+            or not job.output_nomusic_path.exists()):
+        raise HTTPException(404, "not found")
+    safe = re.sub(r"[^\w.\-\u4e00-\u9fff]+", "_",
+                  job.output_nomusic_name or "nomusic.mp4")
+    return _range_response(
+        request, job.output_nomusic_path,
+        MEDIA_TYPES.get(job.output_nomusic_path.suffix.lower(), "video/mp4"),
+        filename=safe,
     )
 
 

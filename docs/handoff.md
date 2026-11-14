@@ -60,6 +60,7 @@
 | 开机自启 | 计划任务 `webui-shuiyin`（BootTrigger+SYSTEM，幂等） |
 | 桌面快捷方式 | `去水印WebUI.lnk`（双击=确保服务在跑+打开浏览器） |
 | 创作者中心 | `https://shuiyin.jiuyeke.cn/ai/index.html`（五列作品墙 + 虚拟积分 + 模态框；净化接口 `/api/ai/videos` 不含去水印元数据；同受口令保护） |
+| 无背景音乐变体 | 每个输出自动生成 `-无背景音乐` 后缀版本（ffmpeg -an 流复制）；模态框可切换播放/分别下载 |
 | 口令配置 | `webui/gate_passcode.txt` 或环境变量 `WEBUI_PASSCODE`（不入库） |
 | 监听 | `0.0.0.0:8000` |
 | 防火墙规则 | `Remove AI Watermarks WebUI`（TCP 8000） |

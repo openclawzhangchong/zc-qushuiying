@@ -28,6 +28,10 @@ h1 { font-size:22px; margin:0; letter-spacing:1px; }
          -webkit-line-clamp:1; -webkit-box-orient:vertical; }
 .vmeta { color:var(--muted); font-size:11px; display:flex; justify-content:space-between; align-items:center; gap:6px; }
 .credits { color:var(--gold); font-weight:600; white-space:nowrap; }
+.btn-refresh { background:#232b3d; border:1px solid var(--line); color:var(--text);
+               padding:7px 14px; border-radius:8px; font-size:13px; cursor:pointer; }
+.btn-refresh:hover { border-color:var(--acc); color:var(--acc); }
+.btn-refresh:active { transform:scale(.97); }
 .meta-empty { color:var(--muted); font-size:13px; padding:30px 0; text-align:center; grid-column:1/-1; }
 footer.foot { margin-top:34px; text-align:center; color:var(--muted); font-size:12px; line-height:2; }
 footer.foot .brand-line { color:var(--gold); font-size:13.5px; letter-spacing:2px; }
@@ -55,9 +59,12 @@ a.dl:hover { background:rgba(62,207,142,.12); }
 <div class="wrap">
   <header class="top">
     <h1>✨ 创作者中心</h1>
-    <div class="brand">智策Ai联合研发人张大树</div>
+    <div style="display:flex; gap:10px; align-items:center;">
+      <div class="brand">智策Ai联合研发人张大树</div>
+      <button class="btn-refresh" onclick="manualRefresh()" title="手动刷新列表">⟳ 刷新</button>
+    </div>
   </header>
-  <div class="sub">AI 创作视频合集 · 点击卡片放大播放</div>
+  <div class="sub">AI 创作视频合集 · 点击卡片放大播放 · <span id="lastRefresh">—</span></div>
   <div id="videos"><div class="meta-empty">加载中…</div></div>
   <footer class="foot">
     <div class="brand-line">智策Ai联合研发人张大树</div>
@@ -78,6 +85,8 @@ function fmtDate(ts) { return new Date(ts*1000).toLocaleString('zh-CN', {hour12:
 async function refresh() {
   let vids = [];
   try { vids = await (await fetch('/api/ai/videos')).json(); } catch (e) { return; }
+  const lr = $('#lastRefresh');
+  if (lr) lr.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12:false});
   const box = $('#videos');
   if (!vids.length) { box.innerHTML = '<div class="meta-empty">暂无作品，快去创作吧</div>'; return; }
 
@@ -111,21 +120,47 @@ function renderCard(v) {
     </div>`;
 }
 
+let modalVid = null;
 function openModal(id) {
-  const v = LATEST[id];
+  modalVid = LATEST[id];
+  if (!modalVid) return;
+  renderModal('main');
+  $('#overlay').classList.add('show');
+}
+function switchVersion(kind) {
+  if (modalVid) renderModal(kind);
+}
+function renderModal(kind) {
+  const v = modalVid;
   if (!v) return;
-  $('#modalBody').innerHTML = `
+  const hasNomusic = !!v.media_url_nomusic;
+  const src = (kind === 'nomusic' && hasNomusic) ? v.media_url_nomusic : v.media_url;
+  const curName = (kind === 'nomusic' && hasNomusic) ? (v.name_nomusic || '') : v.name;
+  let inner = `
     <button class="modal-x" onclick="closeModal()" title="关闭">✕</button>
-    <video class="video-full" controls autoplay playsinline src="${v.media_url}"></video>
+    <video class="video-full" controls autoplay playsinline src="${src}"></video>
     <div class="mrow">
-      <div class="mname">${escapeHtml(v.name)}</div>
+      <div class="mname">${escapeHtml(curName)}</div>
       <a class="dl" href="${v.download_url}">⬇ 下载</a>
     </div>
     <div class="mmeta">
       <div>${fmtDate(v.created)} · <span class="mode">模式: 区域生成</span> · 消耗积分 <b style="color:var(--gold)">⭐ ${v.credits}</b></div>
     </div>
+    ${hasNomusic ? `
+    <div class="mrow" style="margin-top:6px;">
+      <div style="display:flex; gap:8px;">
+        <button class="btn-refresh ver-btn" data-ver="main" onclick="switchVersion('main')">原声版</button>
+        <button class="btn-refresh ver-btn" data-ver="nomusic" onclick="switchVersion('nomusic')">🎵 无背景音乐版</button>
+      </div>
+      <a class="dl" href="${v.download_url_nomusic}">⬇ 下载无背景音乐版</a>
+    </div>` : ''}
     <div class="creator">智策Ai联合研发人张大树</div>`;
-  $('#overlay').classList.add('show');
+  $('#modalBody').innerHTML = inner;
+  document.querySelectorAll('#modalBody .ver-btn').forEach(b => {
+    const on = b.dataset.ver === kind;
+    b.style.borderColor = on ? 'var(--acc)' : 'var(--line)';
+    b.style.color = on ? 'var(--acc)' : 'var(--text)';
+  });
 }
 function closeModal() {
   const v = $('#modalBody video');
@@ -137,8 +172,17 @@ function escapeHtml(s) {
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
+// 手动刷新（不再定时轮询，降低服务器压力）
+function manualRefresh() {
+  const btn = document.querySelector('.btn-refresh');
+  if (btn) { btn.style.opacity = '.5'; btn.textContent = '⟳ 刷新中…'; }
+  refresh().finally(() => {
+    if (btn) { btn.style.opacity = ''; btn.textContent = '⟳ 刷新'; }
+  });
+}
+
 refresh();
-setInterval(refresh, 5000);
+document.querySelector('#lastRefresh').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12:false});
 </script>
 </body>
 </html>

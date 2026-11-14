@@ -278,13 +278,26 @@ function renderJob(j) {
   return inner;
 }
 
-/* --- 模态框：在线播放 + 下载 + 处理日志 --- */
+/* --- 模态框：在线播放 + 双版本切换 + 下载 + 处理日志 --- */
+let modalJob = null;
 function openModal(id) {
-  const j = LATEST[id];
+  modalJob = LATEST[id];
+  if (!modalJob) return;
+  renderModal('main');
+  $('#overlay').classList.add('show');
+}
+function switchVersion(kind) {
+  if (modalJob) renderModal(kind);
+}
+function renderModal(kind) {
+  const j = modalJob;
   if (!j) return;
+  const hasNomusic = !!(j.media_url_nomusic);
+  const src = (kind === 'nomusic' && hasNomusic) ? j.media_url_nomusic : j.media_url;
+  const curName = (kind === 'nomusic' && hasNomusic) ? (j.output_nomusic_name || '') : displayName(j);
   const badge = { queued:'排队中', running:'处理中', done:'完成', failed:'失败', cancelled:'已取消' }[j.status];
   let inner = `<div class="job-head" style="margin-bottom:10px;">
-      <div class="job-name" style="font-size:15px;">${escapeHtml(displayName(j))}</div>
+      <div class="job-name" style="font-size:15px;">${escapeHtml(curName)}</div>
       <div style="display:flex;gap:8px;align-items:center;">
         <span class="badge ${j.status}">${badge}</span>
         <button class="modal-x" onclick="closeModal()" title="关闭">✕</button>
@@ -292,20 +305,31 @@ function openModal(id) {
     </div>
     <div class="meta">${fmtDate(j.created)} · 模式: ${{auto:'自动识别',all:'去水印+元数据',erase:'区域擦除',metadata:'仅元数据'}[j.mode] || j.mode}${j.preset?' · 预设 '+j.preset:''} · 后端: ${j.backend}${j.trim_end>0 ? ' · 剪尾 '+j.trim_end+' 秒' : ''}</div>`;
   if (j.status === 'done' && j.media_url) {
-    inner += `<video class="video-full" controls autoplay playsinline src="${j.media_url}"></video>
-      <div style="margin-top:12px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
-        <a class="dl" href="${j.download_url}">⬇ 下载 ${escapeHtml(displayName(j))}</a>
-        <span class="meta">${j.message ? escapeHtml(j.message) : ''}</span>
+    if (hasNomusic) {
+      inner += `<div style="margin-top:10px; display:flex; gap:8px;">
+        <button class="btn-s ver-btn" data-ver="main" onclick="switchVersion('main')">原声版</button>
+        <button class="btn-s ver-btn" data-ver="nomusic" onclick="switchVersion('nomusic')">🎵 无背景音乐版</button>
       </div>`;
+    }
+    inner += `<video class="video-full" controls autoplay playsinline src="${src}"></video>
+      <div style="margin-top:12px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
+        <a class="dl" href="${j.download_url}">⬇ 原声版 ${escapeHtml(displayName(j))}</a>
+        ${hasNomusic ? `<a class="dl" href="${j.download_url_nomusic}">⬇ 无背景音乐版 ${escapeHtml(j.output_nomusic_name || '')}</a>` : ''}
+      </div>
+      <div class="meta">${j.message ? escapeHtml(j.message) : ''}</div>`;
   } else if (j.message) {
     inner += `<div class="meta" style="margin-top:10px;">${escapeHtml(j.message)}</div>`;
   }
   if (j.log && j.log.length) {
     inner += `<details class="log"><summary>处理日志</summary><pre class="logbody">${escapeHtml(j.log.join('\n'))}</pre></details>`;
   }
-  const m = $('#modalBody');
-  m.innerHTML = inner;
-  $('#overlay').classList.add('show');
+  $('#modalBody').innerHTML = inner;
+  // 高亮当前版本按钮
+  document.querySelectorAll('#modalBody .ver-btn').forEach(b => {
+    const on = b.dataset.ver === kind;
+    b.style.borderColor = on ? 'var(--acc)' : 'var(--line)';
+    b.style.color = on ? 'var(--acc)' : 'var(--text)';
+  });
 }
 function closeModal() {
   const v = $('#modalBody video');
