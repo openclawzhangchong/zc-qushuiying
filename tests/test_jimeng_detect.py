@@ -193,13 +193,19 @@ def test_wordmark_broken_strokes_collected():
     assert _contains(hit, gbox), f"bbox={hit} 应包含字形 {gbox}"
 
 
-def test_four_corners_detected():
-    """BR / BL / TR / TL 四个角都能定位且框住水印字形。"""
-    for corner in ("BR", "BL", "TR", "TL"):
+def test_corners_detected():
+    """BR / BL / TR 三个轮换角都能定位且框住水印字形。"""
+    for corner in ("BR", "BL", "TR"):
         canvas, gbox = _corner_canvas(corner)
         hit = _detect_frame(canvas, corner)
         assert hit is not None, f"{corner} 未检出"
         assert _contains(hit, gbox), f"{corner} bbox={hit} 应包含 {gbox}"
+
+
+def test_tl_not_scanned():
+    """TL 不在扫描集：左上只有药丸，扫描只会引入假命中（实测）。"""
+    for size in ((1280, 720), (720, 1280)):
+        assert "TL" not in jd.corner_windows(*size), size
 
 
 def test_nickname_length_adaptive():

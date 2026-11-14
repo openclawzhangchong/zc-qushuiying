@@ -184,6 +184,32 @@ def run_job(job: Job) -> None:
             return
         job.status = "running"
         job.started = time.time()
+
+    # auto 模式路由：容器元数据秒判；识别不出时做轻量视觉探测——
+    # 经聊天工具/网盘转存的即梦视频元数据常被剥离，只看元数据会漏判、
+    # 走上游 `video all` 后水印原样保留（真实样本实测）。
+    if job.mode == "auto":
+        try:
+            import erase_engine
+            import jimeng_detect
+
+            if erase_engine.detect_jimeng(job.input_path):
+                job.mode, job.preset = "erase", "jimeng"
+                if job.backend == "cv2":
+                    job.backend = "migan"
+                job.log.append("  [auto] 容器元数据识别为即梦/Dreamina → 区域擦除")
+            elif jimeng_detect.detect_jimeng_visual(job.input_path):
+                job.mode, job.preset = "erase", "jimeng"
+                if job.backend == "cv2":
+                    job.backend = "migan"
+                job.log.append("  [auto] 元数据无标记，画面检出即梦水印 → 区域擦除（转存视频常见）")
+            else:
+                job.mode = "all"
+                job.log.append("  [auto] 未检出即梦水印 → 上游自动检测")
+        except Exception as e:  # noqa: BLE001
+            job.mode = "all"
+            job.log.append(f"  [auto] 来源识别出错（{e}）→ 上游自动检测")
+
     out_dir = OUTPUT_DIR / job.id
     out_dir.mkdir(parents=True, exist_ok=True)
     ext = job.input_path.suffix.lower()
@@ -649,19 +675,8 @@ async def upload(
     if size == 0:
         in_path.unlink(missing_ok=True)
         raise HTTPException(400, "空文件")
-    # auto 模式：先看容器来源，即梦/Dreamina 走区域擦除 + MI-GAN，其余走上游自动检测
-    if mode == "auto":
-        try:
-            import erase_engine
-
-            if erase_engine.detect_jimeng(in_path):
-                mode, preset = "erase", "jimeng"
-                if backend == "cv2":
-                    backend = "migan"
-            else:
-                mode = "all"
-        except Exception:  # noqa: BLE001
-            mode = "all"
+    # auto 模式的路由判定移到 run_job（工作线程）里做：
+    # 元数据秒判；无标记时做轻量视觉探测（抽帧 ≤48），上传响应不被阻塞
     job = Job(id=job_id, name=orig, mode=mode, backend=backend, mark=mark,
               trim_end=trim_end, preset=preset, temporal=bool(temporal), input_path=in_path)
     with JOBS_LOCK:

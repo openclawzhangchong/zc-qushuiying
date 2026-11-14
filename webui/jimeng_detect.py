@@ -44,7 +44,6 @@ WINDOW_W_FRAC = 0.55
 WINDOW_H_FRAC = 0.34
 
 CORNERS: dict[str, tuple[float, float]] = {
-    "TL": (0.0, 0.0),
     "TR": (1.0 - WINDOW_W_FRAC, 0.0),
     "BL": (0.0, 1.0 - WINDOW_H_FRAC),
     "BR": (1.0 - WINDOW_W_FRAC, 1.0 - WINDOW_H_FRAC),
@@ -52,7 +51,9 @@ CORNERS: dict[str, tuple[float, float]] = {
 
 # 竖屏的第二个轮换位在**左中**而非左下：真实竖屏样本（720×1280）实测
 # 水印位于 y 0.478~0.540H（垂直居中偏上），BL 窗口（0.66H~H）完全罩不住。
-# 因此竖屏用 {TL, TR, ML, BR}，横屏沿用 1280×720 标定的四角。
+# 因此竖屏用 {TR, ML, BR}，横屏沿用 1280×720 标定的三角。
+# 两套都**不含 TL**：左上角永远只有「AI生成」药丸（无条件擦除，不需要
+# 检测），而扫描 TL 只会引入药丸/画面内容的假命中（实测）。
 ML_Y_FRAC = 0.42
 
 
@@ -60,7 +61,6 @@ def corner_windows(width: int, height: int) -> dict[str, tuple[float, float]]:
     """Aspect-aware corner windows (relative origins)."""
     if height > width:
         return {
-            "TL": (0.0, 0.0),
             "TR": (1.0 - WINDOW_W_FRAC, 0.0),
             "ML": (0.0, ML_Y_FRAC),
             "BR": (1.0 - WINDOW_W_FRAC, 1.0 - WINDOW_H_FRAC),
@@ -152,14 +152,22 @@ def _glyphs(img: np.ndarray, frame_width: int | None = None) -> list[dict]:
 
 
 def _find_wordmark(glyphs: list[dict], frame_width: int | None = None) -> list[dict] | None:
-    """The "即梦" wordmark: all same-height glyphs on one text line.
+    """The "即梦" wordmark: a strict same-height seed pair + tolerant neighbours.
 
-    注意：不能只取「前两块」。中文笔画常被白色掩码切成多个连通域——
-    实测左下角「即梦」被切成三块：``即`` 拆成两块（117 和 138），
-    ``梦`` 单独一块（160，宽 35）。只取前两块会把 ``梦`` 整个漏掉，
-    擦除框右边界就停在 156，而 ``梦`` 一直延伸到 196。
+    结构判定分两层：
 
-    因此这里收集**同一行、高度一致、横向连续**的全部字形，整体作为词标。
+    1. **种子对**：同一行、横向相邻、高度几乎一致（比值 ≤1.15）的两个
+       强字形——"即""梦"是同一字号，这是横屏/竖屏/强噪声下都稳定的
+       核心签名（实测比 1.00~1.08）。
+    2. **有界邻居扩展**：与种子对同行、横向邻接、高度在
+       [0.55, 1.25]×种子高 之间的字形并入词标。下限容忍笔画洗淡
+       （强噪声背景如秋林径向模糊会把「梦」的上半细笔画洗淡，实测
+       中位数里只剩 ~0.7×「即」高），上限挡住比字还高的背景物体
+       （实测秋林样本里 37px 的亮斑紧贴 28px 的字）。
+
+    注意：不能只取「前两块」。中文笔画常被白色掩码切成多个连通域
+    （实测「即」拆成两块、「梦」一块，或多达 3~4 块），必须按几何
+    连续性整体收集。
     """
     fw = frame_width or _CALIB_WIDTH
     h_min = _adaptive(18, fw, lo=11)
@@ -168,47 +176,65 @@ def _find_wordmark(glyphs: list[dict], frame_width: int | None = None) -> list[d
     if len(cands) < 2:
         return None
     cands.sort(key=lambda g: g["x"])
+    n = len(cands)
     best: tuple[float, list[dict]] | None = None
-    for i in range(len(cands)):
-        group = [cands[i]]
-        for j in range(i + 1, len(cands)):
-            ref, b = group[-1], cands[j]
-            if abs((b["y"] + b["h"] / 2) - (ref["y"] + ref["h"] / 2)) > max(ref["h"], b["h"]) * 0.30:
+
+    def _same_row(a: dict, b: dict) -> bool:
+        return abs((b["y"] + b["h"] / 2) - (a["y"] + a["h"] / 2)) <= max(a["h"], b["h"]) * 0.30
+
+    for i in range(n - 1):
+        for j in range(i + 1, n):
+            a, b = cands[i], cands[j]
+            gap = b["x"] - (a["x"] + a["w"])
+            if gap > max(a["h"], b["h"]) * 1.2:
+                break                      # 按 x 排序，再往后只会更远
+            if not _same_row(a, b) or gap < -8:
                 continue
-            gap = b["x"] - (ref["x"] + ref["w"])
-            if gap > max(ref["h"], b["h"]) * 1.2 or gap < -8:
+            if max(a["h"], b["h"]) / max(1, min(a["h"], b["h"])) > 1.15:
+                continue                   # 种子对必须严格同高
+            pair = [a, b]
+            pair_h = max(a["h"], b["h"])
+            lo, hi = 0.55 * pair_h, 1.25 * pair_h
+
+            # 向右扩展邻居（同行、邻接、高度有界）
+            k = j + 1
+            while k < n:
+                g = cands[k]
+                ref = pair[-1]
+                g2 = g["x"] - (ref["x"] + ref["w"])
+                if g2 > max(ref["h"], g["h"]) * 1.2:
+                    break
+                if (_same_row(ref, g) and g2 >= -8
+                        and lo <= g["h"] <= hi):
+                    pair.append(g)
+                k += 1
+            # 向左扩展（只允许正常字距，不允许跨洞——左伸昵称与 logo
+            # 之间字距连续，远处背景亮点隔着大空隙）
+            k = i - 1
+            while k >= 0:
+                g = cands[k]
+                ref = pair[0]
+                g2 = ref["x"] - (g["x"] + g["w"])
+                if g2 > max(ref["h"], g["h"]) * 1.2:
+                    break
+                if (_same_row(ref, g) and g2 >= -8
+                        and lo <= g["h"] <= hi):
+                    pair.insert(0, g)
+                k -= 1
+
+            gx1 = min(g["x"] for g in pair)
+            gx2 = max(g["x"] + g["w"] for g in pair)
+            if gx2 - gx1 < span_min:
                 continue
-            group.append(b)
-        if len(group) < 2:
-            continue
-        gx1 = min(g["x"] for g in group)
-        gx2 = max(g["x"] + g["w"] for g in group)
-        if gx2 - gx1 < span_min:
-            continue
-        hs = [g["h"] for g in group]
-        # "即梦" 二字高度几乎一致（同一字号）；背景物体的高度比要乱得多。
-        # 实测三个角的真实 wordmark 高度比为 1.00~1.08。
-        if max(hs) / max(1, min(hs)) > 1.15:
-            continue
-        # 保留组内全部字形（可能 2 块，也可能因笔画断裂有 3~4 块）。
-        # 只过滤掉高度明显偏离主体的（如混进来的标点/噪点）。
-        h_med = float(np.median(hs))
-        kept = [g for g in group if abs(g["h"] - h_med) / h_med <= 0.20]
-        if len(kept) < 2:
-            continue
-        # 保留的字形必须彼此横向连续（防止把同行远处的东西并入）
-        kept.sort(key=lambda g: g["x"])
-        h_main = max(g["h"] for g in kept)
-        reach = h_main * 3.0          # "即梦" 两字跨度约 1.5~3 倍字高
-        anchor = kept[0]["x"]
-        kept = [g for g in kept if g["x"] - anchor <= reach]
-        if len(kept) < 2:
-            continue
-        # "即梦" 是画面上最大的文字：用字形高度做主排序依据，
-        # 昵称行的小字（高度约一半）永远排不到前面。
-        score = h_main * 1000.0 + sum(g["area"] for g in kept) / 100.0
-        if best is None or score > best[0]:
-            best = (score, kept)
+            # 保留的字形必须彼此横向连续（防止把同行远处的东西并入）
+            reach = pair_h * 3.0
+            anchor = pair[0]["x"]
+            kept = [g for g in pair if g["x"] - anchor <= reach]
+            if len(kept) < 2:
+                continue
+            score = pair_h * 1000.0 + sum(g["area"] for g in kept) / 100.0
+            if best is None or score > best[0]:
+                best = (score, kept)
     return best[1] if best else None
 
 
@@ -485,11 +511,22 @@ def detect_timeline(
         return (x1, y1, x2 - x1, y2 - y1)
 
     # --- 4. 空档处理：短的由相邻段补齐；长的（如淡出黑场）擦所有已知角 ---
-    corner_boxes = {s["corner"]: merge_max(s["boxes"]) for s in segments if s["corner"]}
+    # 每个角的输出框 = 该角**全部检出**的并集：水印按角固定位置，但逐块
+    # 中位数质量有起伏（强噪声背景会把部分字形洗淡），单块的框可能只含
+    # 局部（实测 BL 段一块只检出昵称细条，主体暴露）；并集才完整。
+    # 注意：同一个角可能被中段空档拆成多个 segment（如强噪声视频里
+    # 某几块误检出假角、把 BL 拆成两段）。字典推导式的同名键会互相
+    # 覆盖——只剩最后一段的框，前一段的框被丢弃（真实样本实测导致
+    # 主体暴露 34 px/帧残留）。必须按角**聚合全部框**再取并集。
+    per_corner: dict[str, list] = {}
+    for sgm in segments:
+        if sgm["corner"]:
+            per_corner.setdefault(sgm["corner"], []).extend(sgm["boxes"])
+    corner_boxes = {c: merge_max(bs) for c, bs in per_corner.items()}
     out: list[tuple[int, int, tuple[int, int, int, int]]] = []
     for si, seg in enumerate(segments):
         if seg["corner"] is not None:
-            out.append((seg["start"], seg["end"], merge_max(seg["boxes"])))
+            out.append((seg["start"], seg["end"], corner_boxes[seg["corner"]]))
             continue
         gap = seg["end"] - seg["start"]
         if gap <= max(4, int(round(fps * min_segment_seconds * 1.5))):
@@ -508,7 +545,8 @@ def detect_timeline(
         #     它的边缘，全程擦除会毁掉它（真实竖屏样本实测）。
         is_tail_gap = not any(s["corner"] for s in segments[si + 1:])
         if is_tail_gap:
-            gap_end = min(seg["end"], seg["start"] + int(round(fps * 1.0)))
+            # 1.5s：覆盖淡出过程（真实样本水印在最后检出后 ~1.2s 才完全隐去）
+            gap_end = min(seg["end"], seg["start"] + int(round(fps * 1.5)))
         else:
             gap_end = seg["end"]
         for gs in range(seg["start"], gap_end, chunk):
@@ -518,6 +556,68 @@ def detect_timeline(
 
     out.sort(key=lambda x: x[0])
     return out
+
+
+def detect_jimeng_visual(path: Path, samples: int = 48) -> bool:
+    """轻量视觉探测：均匀抽帧（默认 ≤48 帧、不整段载入内存），
+    每 4 帧一组做时间中位数后跑角窗检测；任一组检出即梦 wordmark
+    即返回 True。仅用作 auto 模式的路由信号（转存视频的容器元数据
+    常被剥离），正式擦除仍走完整的 detect_timeline。
+    """
+    cap = open_video_capture(path)
+    if not cap.isOpened():
+        return False
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    w = h = 0
+    group: list[np.ndarray] = []
+
+    def flush() -> bool:
+        if len(group) < 2 or w == 0:
+            return False
+        med = np.median(np.stack(group), axis=0).astype(np.uint8)
+        for corner in corner_windows(w, h):
+            wx, wy, ww, wh = _window(w, h, corner)
+            if ww <= 8 or wh <= 8:
+                continue
+            if detect_in_window(med[wy:wy + wh, wx:wx + ww], corner,
+                                frame_width=w) is not None:
+                return True
+        return False
+
+    try:
+        if total > 0:
+            idxs = np.linspace(0, total - 1, min(samples, total)).astype(int)
+            for i in idxs:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
+                ok, f = cap.read()
+                if not ok:
+                    continue
+                if w == 0:
+                    h, w = f.shape[:2]
+                group.append(f)
+                if len(group) >= 4 and flush():
+                    return True
+                if len(group) >= 4:
+                    group.clear()
+            if flush():
+                return True
+        else:
+            for _ in range(samples):
+                ok, f = cap.read()
+                if not ok:
+                    break
+                if w == 0:
+                    h, w = f.shape[:2]
+                group.append(f)
+                if len(group) >= 4 and flush():
+                    return True
+                if len(group) >= 4:
+                    group.clear()
+            if flush():
+                return True
+    finally:
+        cap.release()
+    return False
 
 
 def pill_region(width: int, height: int) -> tuple[int, int, int, int]:
